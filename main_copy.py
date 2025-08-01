@@ -1,6 +1,6 @@
 # Questo programma chiede all'utente il nome di un film o una serie,
 # costruisce un URL di ricerca per onlineserietv.com,
-# lo apre in un browser virtuale (non-headless) utilizzando SeleniumBase con la UC Mode abilitata,
+# lo apre in un browser virtuale utilizzando SeleniumBase con la UC Mode abilitata,
 # estrae i titoli dei risultati con Beautiful Soup 4 e li mostra nel terminale.
 
 # Importiamo la classe SB (SeleniumBase Manager) per gestire il browser.
@@ -18,11 +18,10 @@ if __name__ == "__main__":
     titolo = input()
 
     # Stampiamo a schermo il titolo che l'utente ha inserito.
-    print(f"Hai inserito: {titolo}")
+    print(f"Hai inserisci: {titolo}")
 
     # Codifichiamo il titolo per l'URL. Questo è fondamentale per gestire
     # spazi e caratteri speciali nell'URL in modo corretto.
-    # Correzione: usiamo direttamente urllib.parse.quote_plus
     titolo_codificato = urllib.parse.quote_plus(titolo)
 
     # Costruiamo l'URL di ricerca.
@@ -65,26 +64,27 @@ if __name__ == "__main__":
         # Creiamo un oggetto BeautifulSoup per analizzare l'HTML.
         soup = BeautifulSoup(page_source, 'html.parser')
 
-        # Troviamo tutti i tag h2 con la classe 'imagen' all'interno del div 'box_movies'
-        # Questo è un approccio più diretto e preciso per trovare i titoli.
-        # Correzione: La ricerca dei titoli è stata resa più diretta.
-        title_tags = soup.find('div', id='box_movies').find_all('h2', class_='imagen')
+        # Troviamo tutti i div con la classe 'movie' all'interno del div 'box_movies'.
+        movie_items = soup.find('div', id='box_movies').find_all('div', class_='movie')
 
         print("\n--- Risultati della ricerca ---")
-        if title_tags:
+        if movie_items:
             found_count = 0
-            for i, title_tag in enumerate(title_tags):
-                # Otteniamo il testo del titolo e lo puliamo.
-                title_text = title_tag.text.strip()
-                # Verifichiamo se l'input dell'utente è presente nel titolo estratto (case-insensitive).
-                if titolo.lower() in title_text.lower():
-                    print(f"{i+1}. {title_text}")
-                    found_count += 1
+            for i, item in enumerate(movie_items):
+                # Troviamo il tag h2 all'interno di ogni 'div.movie'
+                title_tag = item.find('h2')
+                if title_tag:
+                    # Otteniamo il testo del titolo e lo puliamo.
+                    title_text = title_tag.text.strip()
+                    # Verifichiamo se l'input dell'utente è presente nel titolo estratto (case-insensitive).
+                    if titolo.lower() in title_text.lower():
+                        print(f"{i+1}. {title_text}")
+                        found_count += 1
             if found_count == 0:
                 print(f"Nessun risultato trovato che contenga la parola '{titolo}'.")
         else:
             print("Nessun risultato trovato con i selettori attuali.")
-            print("Verifica se i selettori HTML ('div#box_movies', 'h2.imagen') sono ancora validi.")
+            print("Verifica se i selettori HTML ('div#box_movies', 'div.movie', 'h2') sono ancora validi.")
 
         print("--- Fine dei risultati ---")
 
