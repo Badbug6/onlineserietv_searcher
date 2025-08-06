@@ -1,95 +1,220 @@
-# Questo programma chiede all'utente il nome di un film o una serie,
-# costruisce un URL di ricerca per onlineserietv.com,
-# lo apre in un browser virtuale utilizzando SeleniumBase con la UC Mode abilitata,
-# estrae i titoli dei risultati con Beautiful Soup 4 e li mostra nel terminale.
+# Questo programma cerca film o serie TV, naviga verso la loro pagina,
+# e cerca di estrarre il link .m3u8 del flusso video ispezionando le richieste di rete.
+# Utilizza SeleniumBase in modalità UC per aggirare le protezioni di Cloudflare.
 
-# Importiamo la classe SB (SeleniumBase Manager) per gestire il browser.
+# Importiamo le librerie necessarie.
 from seleniumbase import SB
-import urllib.parse # Importiamo per codificare l'URL correttamente
-from bs4 import BeautifulSoup # Importiamo Beautiful Soup per il parsing HTML
+import urllib.parse
+from bs4 import BeautifulSoup
+import re
+import time
+import argparse
+import sys
 
-# Questo blocco di codice è per l'esecuzione diretta dello script.
-# Inizializza SeleniumBase e avvia il processo di ricerca.
+# --- OPZIONI DI DEBUG ---
+# Imposta su True per attivare la stampa dettagliata per il debug.
+verbose_debug = True
+
+# Codici ANSI per i colori del testo.
+class Bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+# =========================================================================
+# Logica principale del programma.
+# =========================================================================
 if __name__ == "__main__":
-    print("Benvenuto! Inserisci il nome di un film o una serie TV:")
+    # Configura il parser degli argomenti da riga di comando
+    parser = argparse.ArgumentParser(description='Cerca e trova link .m3u8 per film e serie TV.')
+    parser.add_argument('--link', type=str, help='Inserisci il link diretto alla pagina del film o serie TV.')
+    args = parser.parse_args()
 
-    # La funzione input() attende che l'utente digiti qualcosa
-    # e prema Invio. Il testo digitato viene poi salvato nella variabile 'titolo'.
-    titolo = input()
+    # Nuove variabili per la configurazione del player
+    SELECT_PLAYER_ID = "sel_player"  # Corrisponde all'attributo `name` dell'elemento <select>
+    PLAYER_NAME_FLEXI = "flexy"      # Corrisponde all'attributo `value` del player Flexy
 
-    # Stampiamo a schermo il titolo che l'utente ha inserito.
-    print(f"Hai inserisci: {titolo}")
+    selected_link = args.link
 
-    # Codifichiamo il titolo per l'URL. Questo è fondamentale per gestire
-    # spazi e caratteri speciali nell'URL in modo corretto.
-    titolo_codificato = urllib.parse.quote_plus(titolo)
-
-    # Costruiamo l'URL di ricerca.
-    # L'URL base per la ricerca su onlineserietv.com è https://onlineserietv.com/?s=
-    base_url = "https://onlineserietv.com/?s="
-    search_url = f"{base_url}{titolo_codificato}"
-
-    # Stampiamo l'URL di ricerca generato.
-    print(f"L'URL di ricerca generato è: {search_url}")
-    print("Avvio della ricerca...")
-
-    # Utilizziamo il gestore SB() per avviare e chiudere il browser automaticamente.
-    # Il parametro 'uc=True' abilita la UC Mode (Undetected ChromeDriver) per aggirare Cloudflare.
-    # Il parametro 'headless=False' fa sì che il browser sia visibile.
+    # Inizializziamo SeleniumBase in modalità Undetected-Chromedriver per bypassare Cloudflare
     with SB(uc=True, headless=False) as sb:
-        # Apriamo l'URL generato nel browser virtuale.
-        # sb.open() naviga all'URL specificato.
-        sb.open(search_url)
+        if not selected_link:
+            print(f"{Bcolors.OKBLUE}Benvenuto! Inserisci il nome di un film o una serie TV:{Bcolors.ENDC}")
+            titolo = input()
 
-        print("Attendo il caricamento dei risultati o la risoluzione di Cloudflare...")
+            print(f"Hai inserito: {Bcolors.WARNING}{titolo}{Bcolors.ENDC}")
+            titolo_codificato = urllib.parse.quote_plus(titolo)
+            base_url = "https://onlineserietv.com/?s="
+            search_url = f"{base_url}{titolo_codificato}"
+
+            print(f"L'URL di ricerca generato è: {Bcolors.OKCYAN}{search_url}{Bcolors.ENDC}")
+            print("Avvio della ricerca...")
+
+            sb.open(search_url)
+
+            print("Attendo il caricamento dei risultati o la risoluzione di Cloudflare...")
+            try:
+                # Aspetta che l'elemento principale della pagina dei risultati sia visibile
+                sb.wait_for_element("div#box_movies", timeout=30)
+                print(f"{Bcolors.OKGREEN}Pagina dei risultati caricata con successo.{Bcolors.ENDC}")
+            except Exception:
+                print(f"{Bcolors.FAIL}Impossibile caricare la pagina dei risultati entro il tempo limite.{Bcolors.ENDC}")
+                page_source_on_fail = sb.get_page_source()
+                if "cloudflare" in page_source_on_fail.lower() or "just a moment" in page_source_on_fail.lower():
+                    print("Diagnosi: Sembra che Cloudflare CAPTCHA sia ancora attivo.")
+                print("Il programma terminerà in quanto non è stato possibile ottenere i risultati.")
+                sys.exit()
+            
+            page_source = sb.get_page_source()
+            if verbose_debug:
+                print(f"\n{Bcolors.HEADER}--- DEBUG: Codice sorgente della pagina di ricerca ---{Bcolors.ENDC}")
+                print(page_source)
+                print(f"{Bcolors.HEADER}----------------------------------------------------{Bcolors.ENDC}")
+
+            soup = BeautifulSoup(page_source, 'html.parser')
+            movie_items = soup.find('div', id='box_movies').find_all('div', class_='movie')
+
+            print("\n--- Risultati della ricerca ---")
+            if movie_items:
+                found_results = []
+                max_len = 0
+                for item in movie_items:
+                    title_tag = item.find('h2')
+                    link_tag = item.find('a')
+                    if title_tag and link_tag:
+                        title_text = title_tag.text.strip()
+                        link_url = link_tag['href']
+                        content_type = "Serie TV" if "/serietv/" in link_url else "Film"
+                        
+                        if titolo.lower() in title_text.lower():
+                            found_results.append({
+                                'title': title_text,
+                                'link': link_url,
+                                'type': content_type
+                            })
+                            if len(title_text) > max_len:
+                                max_len = len(title_text)
+
+                if found_results:
+                    name_col_width = max(max_len, len("Name"))
+                    type_col_width = max(len("Serie TV"), len("Type"))
+                    table_width = name_col_width + len("Index") + type_col_width + 8
+                    
+                    print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
+                    print(f"{Bcolors.OKCYAN}| {'Index':<5} | {'Name':<{name_col_width}} | {'Type':<{type_col_width}} |{Bcolors.ENDC}")
+                    print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
+                    
+                    colors = [Bcolors.FAIL, Bcolors.OKGREEN, Bcolors.WARNING, Bcolors.OKBLUE, Bcolors.HEADER, Bcolors.OKCYAN]
+                    for i, result in enumerate(found_results):
+                        color = colors[i % len(colors)]
+                        print(f"| {color}{i+1:<5}{Bcolors.ENDC} | {color}{result['title']:<{name_col_width}}{Bcolors.ENDC} | {color}{result['type']:<{type_col_width}}{Bcolors.ENDC} |")
+                    print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
+
+                    while True:
+                        try:
+                            selection = input(f"{Bcolors.OKBLUE}Inserisci il numero del risultato che vuoi aprire (o 'q' per uscire): {Bcolors.ENDC}")
+                            if selection.lower() == 'q':
+                                print("Uscita...")
+                                sys.exit()
+                            
+                            index = int(selection) - 1
+                            if 0 <= index < len(found_results):
+                                selected_link = found_results[index]['link']
+                                break
+                            else:
+                                print(f"{Bcolors.FAIL}Selezione non valida. Inserisci un numero tra 1 e {len(found_results)}.{Bcolors.ENDC}")
+                        except ValueError:
+                            print(f"{Bcolors.FAIL}Input non valido. Inserisci un numero.{Bcolors.ENDC}")
+                else:
+                    print(f"{Bcolors.FAIL}Nessun risultato trovato che contenga la parola '{titolo}'.{Bcolors.ENDC}")
+                    sys.exit()
+            else:
+                print(f"{Bcolors.FAIL}Nessun risultato trovato con i selettori attuali.{Bcolors.ENDC}")
+                sys.exit()
+        
+        # Logica per l'estrazione del link .m3u8, comune a entrambi i percorsi
+        print(f"{Bcolors.OKGREEN}Apertura del link: {selected_link}{Bcolors.ENDC}")
+        sb.open(selected_link)
+        
+        # Aggiungiamo un'attesa esplicita per assicurarci che la pagina sia completamente caricata
+        sb.wait_for_ready_state_complete()
+        
+        print(f"{Bcolors.WARNING}\n--- Ricerca del link .m3u8 ---{Bcolors.ENDC}")
+        
+        # Passaggio 1: Seleziona il player "Flexy" usando le nuove variabili
         try:
-            # Attendiamo che la griglia dei risultati sia visibile, utilizzando il selettore corretto.
-            # Aumentiamo il timeout a 30 secondi per dare più tempo alla risoluzione del CAPTCHA.
-            sb.wait_for_element("div#box_movies", timeout=30)
-            print("Pagina dei risultati caricata con successo.")
+            print(f"{Bcolors.OKCYAN}Tentativo di selezionare il player '{PLAYER_NAME_FLEXI}'...{Bcolors.ENDC}")
+            # Cerca e clicca sul selettore del player
+            sb.wait_for_element_clickable(f"select[name='{SELECT_PLAYER_ID}']", timeout=10)
+            sb.click(f"select[name='{SELECT_PLAYER_ID}']")
+            
+            # Cerca e clicca sull'opzione 'Flexy'
+            sb.wait_for_element_clickable(f"select[name='{SELECT_PLAYER_ID}'] option[value='{PLAYER_NAME_FLEXI}']", timeout=5)
+            sb.click(f"select[name='{SELECT_PLAYER_ID}'] option[value='{PLAYER_NAME_FLEXI}']")
+            
+            # Aggiungiamo una breve attesa per permettere al player di caricarsi dopo la selezione
+            time.sleep(2)
+            
+            print(f"{Bcolors.OKGREEN}Player '{PLAYER_NAME_FLEXI}' selezionato con successo.{Bcolors.ENDC}")
+        except Exception as e:
+            print(f"{Bcolors.FAIL}Errore nella selezione del player '{PLAYER_NAME_FLEXI}': {e}{Bcolors.ENDC}")
+        
+        # Passaggio 2: Clicca sul pulsante 'Play' con una logica più robusta
+        print(f"{Bcolors.OKCYAN}Tentativo di cliccare sul pulsante di riproduzione...{Bcolors.ENDC}")
+        button_clicked = False
+        
+        # Nuovo selettore per il pulsante Play all'interno di un player Plyr
+        try:
+            sb.wait_for_element_visible("div.plyr__controls button.plyr__control[data-plyr='play']", timeout=10)
+            sb.click("div.plyr__controls button.plyr__control[data-plyr='play']")
+            print(f"{Bcolors.OKGREEN}Pulsante di riproduzione (Plyr) trovato e cliccato.{Bcolors.ENDC}")
+            button_clicked = True
         except Exception:
-            print("Impossibile caricare la pagina dei risultati entro il tempo limite.")
-            print("Potrebbe essere che Cloudflare stia ancora bloccando l'accesso o che i selettori HTML siano cambiati.")
-            # Otteniamo comunque la sorgente della pagina per un'analisi diagnostica
-            page_source_on_fail = sb.get_page_source()
-            if "cloudflare" in page_source_on_fail.lower() or "just a moment" in page_source_on_fail.lower():
-                print("Diagnosi: Sembra che Cloudflare CAPTCHA sia ancora attivo.")
-            print("Il programma terminerà in quanto non è stato possibile ottenere i risultati.")
-            # Usciamo dal programma se non riusciamo a superare Cloudflare o caricare i risultati.
-            exit()
+            print(f"{Bcolors.WARNING}Pulsante di riproduzione (Plyr) non trovato. Provo con i selettori precedenti.{Bcolors.ENDC}")
 
-        # Otteniamo il codice sorgente HTML della pagina corrente.
-        page_source = sb.get_page_source()
+        # Se il nuovo selettore non funziona, prova i selettori precedenti come fallback
+        if not button_clicked:
+            # Tentativo 1: Cerca il pulsante specifico (img[alt='Player dello Streaming'])
+            try:
+                sb.wait_for_element_visible("a img[alt='Player dello Streaming']", timeout=5)
+                sb.click("a img[alt='Player dello Streaming']")
+                print(f"{Bcolors.OKGREEN}Pulsante di riproduzione specifico trovato e cliccato.{Bcolors.ENDC}")
+                button_clicked = True
+            except Exception:
+                print(f"{Bcolors.WARNING}Pulsante di riproduzione specifico non trovato. Provo con il prossimo selettore.{Bcolors.ENDC}")
 
-        # Creiamo un oggetto BeautifulSoup per analizzare l'HTML.
-        soup = BeautifulSoup(page_source, 'html.parser')
+        if not button_clicked:
+            # Tentativo 2: Cerca il pulsante standard (vjs-big-play-button)
+            try:
+                sb.wait_for_element_visible("div#vplayer button.vjs-big-play-button", timeout=5)
+                sb.click("div#vplayer button.vjs-big-play-button")
+                print(f"{Bcolors.OKGREEN}Pulsante di riproduzione standard (vjs) trovato e cliccato.{Bcolors.ENDC}")
+                button_clicked = True
+            except Exception:
+                print(f"{Bcolors.FAIL}Pulsante di riproduzione standard non trovato.{Bcolors.ENDC}")
 
-        # Troviamo tutti i div con la classe 'movie' all'interno del div 'box_movies'.
-        movie_items = soup.find('div', id='box_movies').find_all('div', class_='movie')
+        if not button_clicked:
+            print(f"{Bcolors.FAIL}Nessun pulsante di riproduzione valido trovato. Procedo comunque con la ricerca del link.{Bcolors.ENDC}")
 
-        print("\n--- Risultati della ricerca ---")
-        if movie_items:
-            found_count = 0
-            for i, item in enumerate(movie_items):
-                # Troviamo il tag h2 all'interno di ogni 'div.movie'
-                title_tag = item.find('h2')
-                if title_tag:
-                    # Otteniamo il testo del titolo e lo puliamo.
-                    title_text = title_tag.text.strip()
-                    # Verifichiamo se l'input dell'utente è presente nel titolo estratto (case-insensitive).
-                    if titolo.lower() in title_text.lower():
-                        print(f"{i+1}. {title_text}")
-                        found_count += 1
-            if found_count == 0:
-                print(f"Nessun risultato trovato che contenga la parola '{titolo}'.")
-        else:
-            print("Nessun risultato trovato con i selettori attuali.")
-            print("Verifica se i selettori HTML ('div#box_movies', 'div.movie', 'h2') sono ancora validi.")
-
-        print("--- Fine dei risultati ---")
-
-        # Il browser rimarrà aperto finché non premerai Invio nel terminale
-        input("Premi Invio nel terminale per chiudere il browser...")
-
-        # Il browser verrà chiuso automaticamente quando si esce dal blocco 'with'
-        # dopo che l'utente ha premuto Invio.
+        # Aggiungiamo un ritardo più lungo dopo aver cliccato play, per dare tempo al browser
+        # di inviare la richiesta del flusso video.
+        print(f"{Bcolors.OKCYAN}Attendo 10 secondi per consentire il caricamento del flusso video...{Bcolors.ENDC}")
+        time.sleep(10)
+        
+        m3u8_link = None
+        try:
+            print(f"{Bcolors.OKCYAN}Attendo la richiesta per il link .m3u8...{Bcolors.ENDC}")
+            # Il pattern regex aggiornato è ancora più specifico per gestire URL con o senza parametri.
+            m3u8_link = sb.wait_for_request(r'https?://[^\s\'"]+\.m3u8.*', timeout=10)
+            print(f"{Bcolors.OKGREEN}Link master.m3u8 trovato tramite richieste di rete: {m3u8_link}{Bcolors.ENDC}")
+        except Exception:
+            print(f"{Bcolors.FAIL}Nessun link master.m3u8 trovato dopo tutti i tentativi.{Bcolors.ENDC}")
+        
+        print("\n--- Fine dei risultati ---")
+        input(f"{Bcolors.OKBLUE}Premi Invio nel terminale per chiudere il browser...{Bcolors.ENDC}")
