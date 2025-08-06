@@ -261,7 +261,7 @@ def main():
 
     # Inizializziamo SeleniumBase in modalità Undetected-Chromedriver per bypassare Cloudflare
     # headless=False per vedere il browser in azione, utile per il debug.
-    with SB(uc=True, headless=False) as sb:
+    with SB(uc=True, headless=True) as sb:
         if not content_link:
             print(f"{Bcolors.OKBLUE}Benvenuto! Inserisci il nome di un film o una serie TV:{Bcolors.ENDC}")
             title = input()
@@ -315,6 +315,6 @@ def main():
                 print(f"{Bcolors.FAIL}Impossibile trovare il link .m3u8 finale.{Bcolors.ENDC}")
             
         print("\n--- Fine del programma ---")
-        input(f"{Bcolors.OKBLUE}Premi Invio nel terminale per chiudere il browser...{Bcolors.ENDC}")
+       # input(f"{Bcolors.OKBLUE}Premi Invio nel terminale per chiudere il browser...{Bcolors.ENDC}")
 if __name__ == "__main__":
     main()
