@@ -11,13 +11,15 @@ import urllib.parse
 import argparse
 import sys
 import time
-# NUOVE DIPENDENZE: Assicurati di averle installate con:
-# pip install curl_cffi jsbeautifier
-# La libreria curl_cffi non è più necessaria per l'estrazione finale,
-# ma la manteniamo per completezza se volessi usarla altrove.
-from curl_cffi import requests 
-import jsbeautifier
+import subprocess
+import os
+import signal
 
+# NUOVE DIPENDENZE: Assicurati di averle installate con:
+# pip install jsbeautifier tqdm
+# E che 'ffmpeg' e 'ffprobe' siano nel tuo PATH.
+import jsbeautifier
+from tqdm import tqdm
 
 # --- OPZIONI DI DEBUG ---
 # Imposta su True per attivare la stampa dettagliata per il debug.
@@ -84,7 +86,6 @@ def search_content_sb(sb_instance, title):
             title_text = title_tag.text.strip()
             link_url = link_tag['href']
             
-            # --- QUI IL CODICE DISTINGUE TRA FILM E SERIE TV ---
             # Se l'URL contiene "/serietv/", lo classifica come "Serie TV".
             # Altrimenti, lo classifica come "Film".
             content_type = "Serie TV" if "/serietv/" in link_url else "Film"
@@ -98,50 +99,6 @@ def search_content_sb(sb_instance, title):
                 })
     
     return results
-
-# La funzione extract_m3u8_from_flexy non è più utilizzata direttamente
-# perché l'analisi avviene all'interno della sessione di SeleniumBase.
-# La manteniamo qui per riferimento, ma non verrà chiamata.
-def extract_m3u8_from_flexy(player_url):
-    """
-    (NON PIÙ UTILIZZATA DIRETTAMENTE) Estrae il link .m3u8 direttamente dalla pagina del player Flexy,
-    decodificando il JavaScript offuscato, usando curl_cffi.
-    """
-    print(f"{Bcolors.OKCYAN}Analisi diretta del player (via curl_cffi - non più il metodo principale): {player_url}{Bcolors.ENDC}")
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Referer': 'https://flexy.stream/' # Un referer generico può aiutare
-    }
-    try:
-        print(f"[*] Eseguo la richiesta al player impersonando un browser...")
-        resp = requests.get(player_url, headers=headers, impersonate='chrome110', timeout=20)
-        print(f"[*] Risposta del player ricevuta con status: {resp.status_code}")
-
-        if resp.status_code != 200:
-            print(f"{Bcolors.FAIL}Impossibile accedere alla pagina del player. Status: {resp.status_code}{Bcolors.ENDC}")
-            return None
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        for script in soup.find_all("script"):
-            if "eval(function(p,a,c,k,e,d)" in script.text:
-                print("[*] Trovato script offuscato. Tentativo di decodifica...")
-                data_js = jsbeautifier.beautify(script.text)
-                match = re.search(r'sources:\s*\[\{\s*src:\s*"([^"]+)"', data_js)
-
-                if match:
-                    m3u8_link = match.group(1)
-                    print(f"{Bcolors.OKGREEN}Link .m3u8 trovato nello script: {m3u8_link}{Bcolors.ENDC}")
-                    return m3u8_link
-        
-        print(f"{Bcolors.FAIL}Nessun link .m3u8 trovato nello script offuscato.{Bcolors.ENDC}")
-        return None
-
-    except Exception as e:
-        print(f"{Bcolors.FAIL}Errore durante l'analisi diretta del player: {e}{Bcolors.ENDC}")
-        return None
 
 def get_m3u8_link_via_seleniumbase(sb_instance, content_url):
     """
@@ -162,14 +119,13 @@ def get_m3u8_link_via_seleniumbase(sb_instance, content_url):
     
     print(f"{Bcolors.WARNING}\n--- Ricerca del link .m3u8 ---{Bcolors.ENDC}")
     
-    # --- MODIFICA: Determina il selettore dell'iframe in base all'URL del contenuto ---
+    # Determina il selettore dell'iframe in base all'URL del contenuto
     if "/serietv/" in content_url:
         selection_iframe_selector = "iframe[src*='streaming-serie-tv']"
         print(f"{Bcolors.OKCYAN}Identificato come Serie TV. Ricerca dell'iframe per 'streaming-serie-tv'...{Bcolors.ENDC}")
     else:
         selection_iframe_selector = "iframe[src*='stream-film']"
         print(f"{Bcolors.OKCYAN}Identificato come Film. Ricerca dell'iframe per 'stream-film'...{Bcolors.ENDC}")
-    # --- FINE MODIFICA ---
     
     try:
         print(f"{Bcolors.OKCYAN}Ricerca dell'iframe della pagina di selezione del player...{Bcolors.ENDC}")
@@ -259,73 +215,235 @@ def get_m3u8_link_via_seleniumbase(sb_instance, content_url):
         # print(sb_instance.get_page_source()[:1000]) # Stampa solo i primi 1000 caratteri
         return None
 
+class HLS_Downloader:
+    """
+    Una classe per scaricare e convertire un flusso HLS (.m3u8) in un file .mp4
+    usando ffmpeg.
+    """
+    def __init__(self, m3u8_url, output_path):
+        self.m3u8_url = m3u8_url
+        self.output_path = output_path
+        
+    def start(self):
+        # Aggiunge l'estensione .mp4 se non è già presente
+        if not self.output_path.lower().endswith(".mp4"):
+            self.output_path += ".mp4"
+        
+        # Crea la cartella "Download" se non esiste
+        download_folder = "Download"
+        if not os.path.exists(download_folder):
+            os.makedirs(download_folder)
+
+        full_output_path = os.path.join(download_folder, self.output_path)
+
+        # Verifica se il file di destinazione esiste già
+        if os.path.exists(full_output_path):
+            print(f"{Bcolors.WARNING}Il file '{full_output_path}' esiste già. Saltando il download.{Bcolors.ENDC}")
+            return {'error': None, 'output_path': full_output_path}
+            
+        print(f"\n{Bcolors.OKCYAN}" + "="*70 + Bcolors.ENDC)
+        print(f"{Bcolors.OKCYAN}Download: {Bcolors.OKGREEN}{os.path.basename(full_output_path)}{Bcolors.ENDC}")
+        print(f"{Bcolors.OKCYAN}Puoi fermare il download premendo {Bcolors.WARNING}Ctrl+C{Bcolors.ENDC}{Bcolors.OKCYAN}{Bcolors.ENDC}")
+        print(f"{Bcolors.OKCYAN}" + "="*70 + Bcolors.ENDC)
+
+        try:
+            # Step 1: Usa ffprobe per ottenere la durata totale del video in modo affidabile
+            print(f"{Bcolors.OKCYAN}Determinazione della durata del video con ffprobe...{Bcolors.ENDC}")
+            probe_command = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", self.m3u8_url]
+            try:
+                probe_output = subprocess.check_output(probe_command, universal_newlines=True, stderr=subprocess.STDOUT, timeout=10)
+                total_duration_seconds = float(probe_output.strip()) if probe_output.strip() else None
+            except subprocess.TimeoutExpired:
+                print(f"{Bcolors.WARNING}Timeout scaduto per ffprobe. Proseguo senza durata totale.{Bcolors.ENDC}")
+                total_duration_seconds = None
+            except (subprocess.CalledProcessError, ValueError) as e:
+                print(f"{Bcolors.FAIL}Errore nell'esecuzione di ffprobe: {e}. Proseguo senza durata totale.{Bcolors.ENDC}")
+                total_duration_seconds = None
+            
+            if total_duration_seconds:
+                # Calcola ore, minuti e secondi
+                hours = int(total_duration_seconds / 3600)
+                minutes = int((total_duration_seconds % 3600) / 60)
+                seconds = total_duration_seconds % 60
+                
+                print(f"{Bcolors.OKGREEN}Durata totale del video: {hours}h {minutes}m {seconds:.2f}s.{Bcolors.ENDC}")
+
+            # Step 2: Prepara il comando ffmpeg per il download effettivo
+            ffmpeg_command = [
+                "ffmpeg",
+                "-i", self.m3u8_url,
+                "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",
+                full_output_path
+            ]
+            
+            process = subprocess.Popen(
+                ffmpeg_command,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
+            
+            # Inizializza le variabili per il calcolo della velocità (non più necessario)
+            
+            # Step 3: Gestisci la barra di progressione con tqdm
+            total = total_duration_seconds if total_duration_seconds else 100
+            unit = "s" if total_duration_seconds else "%"
+            
+            with tqdm(total=total, unit=unit, dynamic_ncols=True, leave=True,
+                      desc=f"{Bcolors.OKGREEN}[Download]{Bcolors.ENDC}",
+                      bar_format="{desc}: {percentage:3.0f}%|{bar}{postfix}",
+                      colour='green',
+                      miniters=1) as pbar:
+
+                for line in iter(process.stderr.readline, ''):
+                    # Rimuovi l'output di debug di ffmpeg
+                    # if verbose_debug:
+                    #     print(f"[DEBUG FFMPEG] {line.strip()}")
+                        
+                    # Modifiche per una migliore robustezza
+                    match_time = re.search(r"time=(\d{2}):(\d{2}):(\d{2})\.\d+", line)
+                    match_size = re.search(r"size=\s*(\d+)(\w+)", line) # Cattura anche l'unità (kB, MB, etc.)
+                    
+                    current_size_kb = None
+                    current_time_seconds = None
+                    
+                    if match_time:
+                        h, m, s = match_time.groups()
+                        current_time_seconds = int(h) * 3600 + int(m) * 60 + float(s)
+                        
+                        if total_duration_seconds:
+                            pbar.update(current_time_seconds - pbar.n)
+                            
+                    if match_size:
+                        size_value = int(match_size.group(1))
+                        size_unit = match_size.group(2)
+                        
+                        # Converte la dimensione in KB per un calcolo coerente
+                        if size_unit == 'kB':
+                            current_size_kb = size_value
+                        elif size_unit == 'MB':
+                            current_size_kb = size_value * 1024
+                        elif size_unit == 'GB':
+                            current_size_kb = size_value * 1024 * 1024
+
+                    postfix_str = ""
+                    if current_size_kb is not None:
+                        current_size_mb_display = current_size_kb / 1024
+                        postfix_str += f" | {Bcolors.OKCYAN}Size: {Bcolors.WARNING}{current_size_mb_display:.2f}MB{Bcolors.ENDC}"
+                    
+                    if postfix_str:
+                        pbar.set_postfix_str(postfix_str)
+
+            # Aspetta che il processo termini e ottiene il codice di ritorno
+            process.wait()
+
+            if process.returncode == 0:
+                print(f"\n\n{Bcolors.OKGREEN}Download e conversione completati con successo!{Bcolors.ENDC}")
+                return {'error': None, 'output_path': full_output_path}
+            else:
+                print(f"\n\n{Bcolors.FAIL}Errore: ffmpeg ha terminato con il codice {process.returncode}{Bcolors.ENDC}")
+                return {'error': f"ffmpeg error code: {process.returncode}", 'output_path': None}
+
+        except FileNotFoundError:
+            print(f"\n{Bcolors.FAIL}Errore: 'ffmpeg' o 'ffprobe' non trovato. Assicurati che siano installati e nel tuo PATH.{Bcolors.ENDC}")
+            return {'error': "ffmpeg or ffprobe not found", 'output_path': None}
+        except Exception as e:
+            print(f"\n{Bcolors.FAIL}Si è verificato un errore inaspettato: {e}{Bcolors.ENDC}")
+            return {'error': f"unexpected error: {e}", 'output_path': None}
+        
 def main():
     """
     Funzione principale che esegue il programma.
     """
     parser = argparse.ArgumentParser(description='Cerca e trova link .m3u8 per film e serie TV.')
     parser.add_argument('--link', type=str, help='Inserisci il link diretto alla pagina del film o serie TV.')
+    # Aggiungi un nuovo argomento per il link m3u8 diretto
+    parser.add_argument('-l', '--m3u8-link', type=str, help='Inserisci direttamente il link .m3u8 per avviare il download.')
     args = parser.parse_args()
 
+    # Prendi il link m3u8 dal nuovo argomento, se fornito
+    m3u8_final_link = args.m3u8_link
     content_link = args.link
-    m3u8_final_link = None 
+    results = None
 
-    # Inizializziamo SeleniumBase in modalità Undetected-Chromedriver per bypassare Cloudflare
-    # headless=False per vedere il browser in azione, utile per il debug.
-    with SB(uc=True, headless=True) as sb:
-        if not content_link:
-            print(f"{Bcolors.OKBLUE}Benvenuto! Inserisci il nome di un film o una serie TV:{Bcolors.ENDC}")
-            title = input()
-            
-            results = search_content_sb(sb, title) 
-            
-            if not results:
-                print(f"{Bcolors.FAIL}Nessun risultato trovato per '{title}'.{Bcolors.ENDC}")
-                sys.exit()
+    # Inizializziamo SeleniumBase solo se necessario (se non è stato fornito un link m3u8)
+    if not m3u8_final_link:
+        with SB(uc=True, headless=True) as sb:
+            if not content_link:
+                print(f"{Bcolors.OKBLUE}Benvenuto! Inserisci il nome di un film o una serie TV:{Bcolors.ENDC}")
+                title = input()
                 
-            print("\n--- Risultati della ricerca ---")
-            # Calcola le larghezze delle colonne in modo dinamico
-            max_len = max(len(r['title']) for r in results) if results else 0
-            name_col_width = max(max_len, len("Name"))
-            type_col_width = max(len("Serie TV"), len("Type"))
-            table_width = name_col_width + len("Index") + type_col_width + 8 # 8 per margini e barre
-            
-            print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
-            print(f"{Bcolors.OKCYAN}| {'Index':<5} | {'Name':<{name_col_width}} | {'Type':<{type_col_width}} |{Bcolors.ENDC}")
-            print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
-            
-            colors = [Bcolors.FAIL, Bcolors.OKGREEN, Bcolors.WARNING, Bcolors.OKBLUE, Bcolors.HEADER, Bcolors.OKCYAN]
-            for i, result in enumerate(results):
-                color = colors[i % len(colors)]
-                print(f"| {color}{i+1:<5}{Bcolors.ENDC} | {color}{result['title']:<{name_col_width}}{Bcolors.ENDC} | {color}{result['type']:<{type_col_width}}{Bcolors.ENDC} |")
-            print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
-
-            while True:
-                try:
-                    selection = input(f"{Bcolors.OKBLUE}Inserisci il numero del risultato che vuoi aprire (o 'q' per uscire): {Bcolors.ENDC}")
-                    if selection.lower() == 'q':
-                        print("Uscita...")
-                        sys.exit()
+                results = search_content_sb(sb, title) 
+                
+                if not results:
+                    print(f"{Bcolors.FAIL}Nessun risultato trovato per '{title}'.{Bcolors.ENDC}")
+                    sys.exit()
                     
-                    index = int(selection) - 1
-                    if 0 <= index < len(results):
-                        content_link = results[index]['link']
-                        break
-                    else:
-                        print(f"{Bcolors.FAIL}Selezione non valida. Inserisci un numero tra 1 e {len(results)}.{Bcolors.ENDC}")
-                except ValueError:
-                    print(f"{Bcolors.FAIL}Input non valido. Inserisci un numero.{Bcolors.ENDC}")
-        
-        if content_link:
-            m3u8_final_link = get_m3u8_link_via_seleniumbase(sb, content_link) 
+                print("\n--- Risultati della ricerca ---")
+                # Calcola le larghezze delle colonne in modo dinamico
+                max_len = max(len(r['title']) for r in results) if results else 0
+                name_col_width = max(max_len, len("Name"))
+                type_col_width = max(len("Serie TV"), len("Type"))
+                table_width = name_col_width + len("Index") + type_col_width + 8 # 8 per margini e barre
+                
+                print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
+                print(f"{Bcolors.OKCYAN}| {'Index':<5} | {'Name':<{name_col_width}} | {'Type':<{type_col_width}} |{Bcolors.ENDC}")
+                print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
+                
+                colors = [Bcolors.FAIL, Bcolors.OKGREEN, Bcolors.WARNING, Bcolors.OKBLUE, Bcolors.HEADER, Bcolors.OKCYAN]
+                for i, result in enumerate(results):
+                    color = colors[i % len(colors)]
+                    print(f"| {color}{i+1:<5}{Bcolors.ENDC} | {color}{result['title']:<{name_col_width}}{Bcolors.ENDC} | {color}{result['type']:<{type_col_width}}{Bcolors.ENDC} |")
+                print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
+
+                while True:
+                    try:
+                        selection = input(f"{Bcolors.OKBLUE}Inserisci il numero del risultato che vuoi aprire (o 'q' per uscire): {Bcolors.ENDC}")
+                        if selection.lower() == 'q':
+                            print("Uscita...")
+                            sys.exit()
+                        
+                        index = int(selection) - 1
+                        if 0 <= index < len(results):
+                            content_link = results[index]['link']
+                            break
+                        else:
+                            print(f"{Bcolors.FAIL}Selezione non valida. Inserisci un numero tra 1 e {len(results)}.{Bcolors.ENDC}")
+                    except ValueError:
+                        print(f"{Bcolors.FAIL}Input non valido. Inserisci un numero.{Bcolors.ENDC}")
             
-            if m3u8_final_link:
-                print(f"\n{Bcolors.HEADER}--- LINK .m3u8 FINALE TROVATO ---{Bcolors.ENDC}")
-                print(f"{Bcolors.OKGREEN}{m3u8_final_link}{Bcolors.ENDC}")
+            if content_link:
+                m3u8_final_link = get_m3u8_link_via_seleniumbase(sb, content_link) 
+    
+    # Se un link m3u8 è stato trovato o fornito, avvia il download
+    if m3u8_final_link:
+        print(f"\n{Bcolors.HEADER}--- LINK .m3u8 FINALE TROVATO ---{Bcolors.ENDC}")
+        print(f"{Bcolors.OKGREEN}{m3u8_final_link}{Bcolors.ENDC}")
+
+        # Chiede all'utente se vuole scaricare
+        download_choice = input(f"{Bcolors.OKBLUE}Vuoi scaricare il video in formato .mp4? (s/n): {Bcolors.ENDC}")
+        if download_choice.lower() == 's':
+            filename_suggestion = "video_scaricato"
+            if results and 'index' in locals():
+                filename_suggestion = results[index]['title'].replace(" ", "_").replace(":", "").replace("/", "")
+            
+            output_filename = input(f"{Bcolors.OKBLUE}Inserisci il nome del file di output (es. {filename_suggestion}.mp4): {Bcolors.ENDC}")
+            
+            if output_filename:
+                # Qui chiamiamo la nuova classe HLS_Downloader
+                downloader = HLS_Downloader(m3u8_url=m3u8_final_link, output_path=output_filename)
+                result = downloader.start()
+
+                if result['error']:
+                    print(f"{Bcolors.FAIL}Il download ha fallito: {result['error']}{Bcolors.ENDC}")
+                else:
+                    print(f"{Bcolors.OKGREEN}File salvato in: {result['output_path']}{Bcolors.ENDC}")
             else:
-                print(f"{Bcolors.FAIL}Impossibile trovare il link .m3u8 finale.{Bcolors.ENDC}")
+                print(f"{Bcolors.WARNING}Nome file non inserito, operazione annullata.{Bcolors.ENDC}")
+    else:
+        print(f"{Bcolors.FAIL}Impossibile trovare o utilizzare il link .m3u8 finale.{Bcolors.ENDC}")
             
-        print("\n--- Fine del programma ---")
-        # input(f"{Bcolors.OKBLUE}Premi Invio nel terminale per chiudere il browser...{Bcolors.ENDC}")
+    print("\n--- Fine del programma ---")
+    # input(f"{Bcolors.OKBLUE}Premi Invio nel terminale per chiudere il browser...{Bcolors.ENDC}")
 if __name__ == "__main__":
     main()
