@@ -180,13 +180,22 @@ def get_m3u8_link_via_seleniumbase(sb_instance, content_url):
         print(f"{Bcolors.OKCYAN}Seleziono il player '{flexy_option_value}'...{Bcolors.ENDC}")
         sb_instance.select_option_by_value(select_element_selector, flexy_option_value)
         
-        # Aspettiamo che il contenuto dell'iframe si aggiorni e il nuovo iframe si carichi.
-        # Possiamo aspettare che il nuovo iframe annidato sia presente.
+        # Aspettiamo un breve momento per permettere alla pagina di aggiornarsi dopo la selezione
+        time.sleep(2) 
+
+        # Passaggio 3: Clicca sull'immagine del player per avviarlo
+        # L'immagine ha src="https://onlineserietv.com/player/img/player.png"
+        player_image_selector = "img[src*='player.png']"
+        print(f"{Bcolors.OKCYAN}Clicco sull'immagine del player per avviarlo...{Bcolors.ENDC}")
+        sb_instance.wait_for_element_present(player_image_selector, timeout=10)
+        sb_instance.click(player_image_selector)
+
+        # Passaggio 4: Aspettiamo che l'iframe annidato del player effettivo sia presente
         nested_iframe_selector = "iframe[src*='uprot.net/fxe']"
         print(f"{Bcolors.OKCYAN}Attendendo il caricamento dell'iframe annidato del player Flexy...{Bcolors.ENDC}")
         sb_instance.wait_for_element_present(nested_iframe_selector, timeout=15) # Aumentato timeout
         
-        # Passaggio 3: Passa al contesto dell'iframe annidato
+        # Passaggio 5: Passa al contesto dell'iframe annidato
         print(f"{Bcolors.OKCYAN}Passaggio all'iframe annidato del player Flexy per estrarre il sorgente...{Bcolors.ENDC}")
         sb_instance.switch_to_frame(nested_iframe_selector)
         sb_instance.wait_for_ready_state_complete() # Attende che il contenuto dell'iframe annidato sia caricato
@@ -252,7 +261,7 @@ def main():
 
     # Inizializziamo SeleniumBase in modalità Undetected-Chromedriver per bypassare Cloudflare
     # headless=False per vedere il browser in azione, utile per il debug.
-    with SB(uc=True, headless=False) as sb:
+    with SB(uc=True, headless=True) as sb:
         if not content_link:
             print(f"{Bcolors.OKBLUE}Benvenuto! Inserisci il nome di un film o una serie TV:{Bcolors.ENDC}")
             title = input()
@@ -306,7 +315,6 @@ def main():
                 print(f"{Bcolors.FAIL}Impossibile trovare il link .m3u8 finale.{Bcolors.ENDC}")
             
         print("\n--- Fine del programma ---")
-        input(f"{Bcolors.OKBLUE}Premi Invio nel terminale per chiudere il browser...{Bcolors.ENDC}")
-
+       # input(f"{Bcolors.OKBLUE}Premi Invio nel terminale per chiudere il browser...{Bcolors.ENDC}")
 if __name__ == "__main__":
     main()

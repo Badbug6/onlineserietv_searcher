@@ -83,6 +83,10 @@ def search_content_sb(sb_instance, title):
         if title_tag and link_tag:
             title_text = title_tag.text.strip()
             link_url = link_tag['href']
+            
+            # --- QUI IL CODICE DISTINGUE TRA FILM E SERIE TV ---
+            # Se l'URL contiene "/serietv/", lo classifica come "Serie TV".
+            # Altrimenti, lo classifica come "Film".
             content_type = "Serie TV" if "/serietv/" in link_url else "Film"
             
             # Filtra i risultati per includere solo quelli che contengono il titolo cercato
@@ -158,8 +162,15 @@ def get_m3u8_link_via_seleniumbase(sb_instance, content_url):
     
     print(f"{Bcolors.WARNING}\n--- Ricerca del link .m3u8 ---{Bcolors.ENDC}")
     
-    # Passaggio 0: Trova l'iframe del player di selezione
-    selection_iframe_selector = "iframe[src*='streaming-serie-tv']" 
+    # --- MODIFICA: Determina il selettore dell'iframe in base all'URL del contenuto ---
+    if "/serietv/" in content_url:
+        selection_iframe_selector = "iframe[src*='streaming-serie-tv']"
+        print(f"{Bcolors.OKCYAN}Identificato come Serie TV. Ricerca dell'iframe per 'streaming-serie-tv'...{Bcolors.ENDC}")
+    else:
+        selection_iframe_selector = "iframe[src*='stream-film']"
+        print(f"{Bcolors.OKCYAN}Identificato come Film. Ricerca dell'iframe per 'stream-film'...{Bcolors.ENDC}")
+    # --- FINE MODIFICA ---
+    
     try:
         print(f"{Bcolors.OKCYAN}Ricerca dell'iframe della pagina di selezione del player...{Bcolors.ENDC}")
         sb_instance.wait_for_element_present(selection_iframe_selector, timeout=20)
@@ -315,6 +326,6 @@ def main():
                 print(f"{Bcolors.FAIL}Impossibile trovare il link .m3u8 finale.{Bcolors.ENDC}")
             
         print("\n--- Fine del programma ---")
-       # input(f"{Bcolors.OKBLUE}Premi Invio nel terminale per chiudere il browser...{Bcolors.ENDC}")
+        # input(f"{Bcolors.OKBLUE}Premi Invio nel terminale per chiudere il browser...{Bcolors.ENDC}")
 if __name__ == "__main__":
     main()
