@@ -89,8 +89,22 @@ Nota: il colore della barra di avanzamento è configurabile nel codice tramite l
 6. Output: salvataggio MP4 con nome ripulito nella struttura `Video/Serie/...` o `Video/Movie/...` come sopra.
 
 ## Struttura dei file di output
-- Di default i file vengono salvati nella cartella indicata con `--outdir`.
-- I nomi dei file sono puliti (rimozione caratteri non consentiti e spazi multipli).
+
+- Puoi scegliere la cartella di destinazione dei file scaricati usando il parametro `--outdir`.  
+  Ad esempio, per salvare tutto nella cartella `Download`, aggiungi `--outdir Download` al comando:
+  ```bash
+  python main.py --link "..." --outdir Download
+  ```
+  Se non specifichi `--outdir`, verrà usata la cartella predefinita `Video`.
+
+- La struttura delle cartelle viene creata automaticamente in base al tipo di contenuto:
+  - **Serie TV:**  
+    `Video/Serie/<Nome Serie>/Sxx/<Nome Serie> - Stagione xx - Episodio yy.mp4`
+  - **Film:**  
+    `Video/Movie/<Nome Film>/<Nome Film>.mp4`
+  (Se usi un valore diverso per `--outdir`, la struttura partirà da quella cartella.)
+
+- I nomi di cartelle e file sono ripuliti da caratteri non validi e spazi superflui per garantire compatibilità e ordine.
 
 ## Risoluzione dei problemi
 - "Cloudflare / Just a moment": riprova con `--no-headless` e attendi il caricamento della pagina; eventuali ritardi sono normali.
