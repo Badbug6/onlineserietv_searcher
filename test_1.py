@@ -22,7 +22,6 @@ import subprocess
 import shutil
 from pathlib import Path
 import random
-from tqdm import tqdm
 
 
 # --- OPZIONI DI DEBUG ---
@@ -199,83 +198,23 @@ def ensure_ffmpeg() -> bool:
         print(f"{Bcolors.FAIL}Impossibile installare ffmpeg automaticamente: {e}{Bcolors.ENDC}")
         return False
 
-def _probe_duration_seconds(m3u8_url: str, referer: str, user_agent: str) -> float | None:
-    """Tenta di ottenere la durata (in secondi) via ffprobe. Restituisce None se non disponibile."""
-    ffprobe_path = shutil.which("ffprobe")
-    if not ffprobe_path:
-        return None
-    try:
-        cmd = [
-            ffprobe_path,
-            "-v", "error",
-            "-user_agent", user_agent,
-            "-headers", f"Referer: {referer}\r\nOrigin: {referer}",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            m3u8_url,
-        ]
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True).strip()
-        return float(out) if out else None
-    except Exception:
-        return None
-
-
 def download_m3u8_to_mp4(m3u8_url: str, output_file: Path, referer: str = "https://flexy.stream/", user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36") -> bool:
     if not ensure_ffmpeg():
         print(f"{Bcolors.FAIL}ffmpeg non disponibile. Salto il download di: {output_file.name}{Bcolors.ENDC}")
         return False
 
-    total_duration = _probe_duration_seconds(m3u8_url, referer, user_agent)
-
-    # Comando ffmpeg con emissione progress
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-nostats",
+        "ffmpeg", "-y", "-loglevel", "error",
         "-user_agent", user_agent,
         "-headers", f"Referer: {referer}\r\nOrigin: {referer}",
         "-i", m3u8_url,
         "-c", "copy",
         "-bsf:a", "aac_adtstoasc",
-        "-progress", "pipe:1",
-        "-loglevel", "error",
         str(output_file)
     ]
-
     try:
         print(f"{Bcolors.OKBLUE}Scarico in MP4: {output_file.name}{Bcolors.ENDC}")
-        # Se conosciamo la durata, mostriamo una barra con ETA
-        if total_duration and total_duration > 0:
-            with tqdm(total=int(total_duration), unit="s", unit_scale=False, desc=output_file.name, dynamic_ncols=True) as pbar:
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-                current_sec = 0
-                for line in proc.stdout:
-                    line = line.strip()
-                    if line.startswith("out_time_ms="):
-                        try:
-                            ms = int(line.split("=", 1)[1])
-                            sec = ms // 1_000_000  # out_time_ms usa microsecondi
-                        except Exception:
-                            sec = current_sec
-                    elif line.startswith("out_time="):
-                        # out_time=HH:MM:SS.micro
-                        try:
-                            t = line.split("=", 1)[1]
-                            hh, mm, ss = t.split(":")
-                            sec = int(hh) * 3600 + int(mm) * 60 + float(ss)
-                            sec = int(sec)
-                        except Exception:
-                            sec = current_sec
-                    else:
-                        continue
-                    if sec > current_sec:
-                        pbar.update(min(sec - current_sec, max(0, int(total_duration) - pbar.n)))
-                        current_sec = sec
-                proc.wait()
-                if proc.returncode != 0:
-                    raise subprocess.CalledProcessError(proc.returncode, cmd)
-        else:
-            # Fallback: nessuna durata → esecuzione senza barra
-            subprocess.run(cmd, check=True)
-
+        subprocess.run(cmd, check=True)
         print(f"{Bcolors.OKGREEN}Download completato: {output_file}{Bcolors.ENDC}")
         return True
     except subprocess.CalledProcessError as e:
