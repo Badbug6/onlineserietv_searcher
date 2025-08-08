@@ -17,6 +17,11 @@ import time
 # ma la manteniamo per completezza se volessi usarla altrove.
 from curl_cffi import requests 
 import jsbeautifier
+import os
+import subprocess
+import shutil
+from pathlib import Path
+import random
 
 
 # --- OPZIONI DI DEBUG ---
@@ -143,6 +148,256 @@ def extract_m3u8_from_flexy(player_url):
         print(f"{Bcolors.FAIL}Errore durante l'analisi diretta del player: {e}{Bcolors.ENDC}")
         return None
 
+# -------------------------
+# UTIL & DOWNLOAD HELPERS
+# -------------------------
+
+def sanitize_filename(name: str) -> str:
+    safe = re.sub(r"[\\/:*?\"<>|]", " ", name)
+    safe = re.sub(r"\s+", " ", safe).strip()
+    return safe
+
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+def parse_selection_arg(arg_value: str):
+    if not arg_value or str(arg_value).lower() == "all":
+        return "all"
+    selected: set[int] = set()
+    for part in str(arg_value).split(','):
+        part = part.strip()
+        if not part:
+            continue
+        if '-' in part:
+            a, b = part.split('-', 1)
+            try:
+                start = int(a)
+                end = int(b)
+            except ValueError:
+                continue
+            if start <= end:
+                selected.update(range(start, end + 1))
+            else:
+                selected.update(range(end, start + 1))
+        else:
+            try:
+                selected.add(int(part))
+            except ValueError:
+                continue
+    return selected if selected else "all"
+
+def ensure_ffmpeg() -> bool:
+    if shutil.which("ffmpeg"):
+        return True
+    print(f"{Bcolors.WARNING}ffmpeg non trovato nel sistema. Provo a installarlo...{Bcolors.ENDC}")
+    try:
+        # Best effort install via apt-get
+        subprocess.run(["bash", "-lc", "apt-get update -y && apt-get install -y ffmpeg"], check=True)
+        return shutil.which("ffmpeg") is not None
+    except Exception as e:
+        print(f"{Bcolors.FAIL}Impossibile installare ffmpeg automaticamente: {e}{Bcolors.ENDC}")
+        return False
+
+def download_m3u8_to_mp4(m3u8_url: str, output_file: Path, referer: str = "https://flexy.stream/", user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36") -> bool:
+    if not ensure_ffmpeg():
+        print(f"{Bcolors.FAIL}ffmpeg non disponibile. Salto il download di: {output_file.name}{Bcolors.ENDC}")
+        return False
+
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-user_agent", user_agent,
+        "-headers", f"Referer: {referer}\r\nOrigin: {referer}",
+        "-i", m3u8_url,
+        "-c", "copy",
+        "-bsf:a", "aac_adtstoasc",
+        str(output_file)
+    ]
+    try:
+        print(f"{Bcolors.OKBLUE}Scarico in MP4: {output_file.name}{Bcolors.ENDC}")
+        subprocess.run(cmd, check=True)
+        print(f"{Bcolors.OKGREEN}Download completato: {output_file}{Bcolors.ENDC}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"{Bcolors.FAIL}Errore ffmpeg per {output_file.name}: {e}{Bcolors.ENDC}")
+        return False
+
+# -------------------------
+# ESTRAZIONE M3U8 DALLA PAGINA CORRENTE
+# -------------------------
+
+def extract_m3u8_from_current_page(sb_instance: SB, is_series: bool, max_retries: int = 2) -> str | None:
+    selection_iframe_selector = "iframe[src*='streaming-serie-tv']" if is_series else "iframe[src*='stream-film']"
+    for attempt in range(1, max_retries + 1):
+        try:
+            sb_instance.wait_for_element_present(selection_iframe_selector, timeout=25)
+            sb_instance.switch_to_frame(selection_iframe_selector)
+            sb_instance.wait_for_ready_state_complete()
+
+            select_element_selector = "select[name='sel_player']"
+            flexy_option_value = "fx"
+            sb_instance.select_option_by_value(select_element_selector, flexy_option_value)
+            time.sleep(1.5)
+
+            player_image_selector = "img[src*='player.png']"
+            sb_instance.wait_for_element_present(player_image_selector, timeout=10)
+            sb_instance.click(player_image_selector)
+
+            nested_iframe_selector = "iframe[src*='uprot.net/fxe']"
+            sb_instance.wait_for_element_present(nested_iframe_selector, timeout=20)
+            sb_instance.switch_to_frame(nested_iframe_selector)
+            sb_instance.wait_for_ready_state_complete()
+
+            iframe_page_source = sb_instance.get_page_source()
+            sb_instance.switch_to_parent_frame()
+            sb_instance.switch_to_default_content()
+
+            soup = BeautifulSoup(iframe_page_source, 'html.parser')
+            for script in soup.find_all("script"):
+                if "eval(function(p,a,c,k,e,d)" in script.text:
+                    data_js = jsbeautifier.beautify(script.text)
+                    match = re.search(r'sources:\s*\[\{\s*src:\s*"([^"]+)"', data_js)
+                    if match:
+                        return match.group(1)
+            # Nessun link trovato nel tentativo corrente
+            if attempt < max_retries:
+                print(f"{Bcolors.WARNING}M3U8 non trovato, ritento ({attempt}/{max_retries})...{Bcolors.ENDC}")
+                time.sleep(1.5)
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"{Bcolors.WARNING}Errore durante l'estrazione (tentativo {attempt}/{max_retries}): {e}{Bcolors.ENDC}")
+                try:
+                    sb_instance.switch_to_default_content()
+                except Exception:
+                    pass
+                time.sleep(1.5)
+            else:
+                print(f"{Bcolors.FAIL}Estrazione fallita definitivamente: {e}{Bcolors.ENDC}")
+                try:
+                    sb_instance.switch_to_default_content()
+                except Exception:
+                    pass
+    return None
+
+# -------------------------
+# ENUMERAZIONE STAGIONI/EPISODI E DOWNLOAD
+# -------------------------
+
+def get_series_title_from_page(sb_instance: SB) -> str:
+    html = sb_instance.get_page_source()
+    soup = BeautifulSoup(html, 'html.parser')
+    h1 = soup.find('h1')
+    if h1 and h1.text.strip():
+        return h1.text.strip()
+    title_tag = soup.find('title')
+    return title_tag.text.strip() if title_tag else "Serie"
+
+def list_clickable_children(sb_instance: SB, container_selector: str):
+    elems = []
+    try:
+        sb_instance.wait_for_element_present(container_selector, timeout=25)
+        # Proviamo diversi tipi di elementi potenzialmente cliccabili
+        candidates = sb_instance.find_elements(
+            f"{container_selector} a, {container_selector} button, {container_selector} li, {container_selector} div")
+        for el in candidates:
+            try:
+                if el.is_displayed():
+                    text = el.text.strip()
+                    elems.append((el, text))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return elems
+
+def enumerate_and_download_series(sb_instance: SB, series_url: str, seasons_arg, episodes_arg, outdir: Path, max_retries: int = 3, delay: float = 2.0):
+    print(f"{Bcolors.OKGREEN}Apro la pagina della serie: {series_url}{Bcolors.ENDC}")
+    sb_instance.open(series_url)
+    sb_instance.wait_for_ready_state_complete()
+
+    series_title = sanitize_filename(get_series_title_from_page(sb_instance))
+    print(f"{Bcolors.OKCYAN}Serie rilevata: {series_title}{Bcolors.ENDC}")
+
+    seasons = list_clickable_children(sb_instance, ".div_seasons")
+    if not seasons:
+        print(f"{Bcolors.FAIL}Nessuna stagione trovata (container .div_seasons).{Bcolors.ENDC}")
+        return
+
+    print(f"{Bcolors.OKBLUE}Stagioni disponibili: {len(seasons)}{Bcolors.ENDC}")
+    for idx, (_, label) in enumerate(seasons, start=1):
+        print(f"  - Stagione {idx}: {label}")
+
+    # Applica filtro stagioni
+    seasons_filter = parse_selection_arg(seasons_arg)
+    episodes_filter = parse_selection_arg(episodes_arg)
+
+    for season_index in range(1, len(seasons) + 1):
+        if seasons_filter != "all" and season_index not in seasons_filter:
+            continue
+
+        # Rileggiamo ogni volta gli elementi per evitare StaleElementReference
+        seasons = list_clickable_children(sb_instance, ".div_seasons")
+        if season_index - 1 >= len(seasons):
+            continue
+        season_el, season_label = seasons[season_index - 1]
+        print(f"{Bcolors.OKBLUE}-> Seleziono Stagione {season_index} ({season_label}){Bcolors.ENDC}")
+        try:
+            sb_instance.driver.execute_script("arguments[0].click();", season_el)
+        except Exception:
+            try:
+                season_el.click()
+            except Exception as e:
+                print(f"{Bcolors.WARNING}Impossibile cliccare stagione {season_index}: {e}{Bcolors.ENDC}")
+                continue
+
+        time.sleep(1.2)
+
+        episodes = list_clickable_children(sb_instance, ".div_episodes")
+        if not episodes:
+            print(f"{Bcolors.WARNING}Nessun episodio trovato per la stagione {season_index}.{Bcolors.ENDC}")
+            continue
+
+        print(f"{Bcolors.OKCYAN}Episodi trovati per Stagione {season_index}: {len(episodes)}{Bcolors.ENDC}")
+        for ep_idx, (_, ep_label) in enumerate(episodes, start=1):
+            print(f"    - Ep {ep_idx}: {ep_label}")
+
+        for episode_index in range(1, len(episodes) + 1):
+            if episodes_filter != "all" and episode_index not in episodes_filter:
+                continue
+
+            episodes = list_clickable_children(sb_instance, ".div_episodes")
+            if episode_index - 1 >= len(episodes):
+                continue
+            ep_el, ep_label = episodes[episode_index - 1]
+
+            print(f"{Bcolors.OKGREEN}--> Seleziono Episodio {episode_index} ({ep_label}){Bcolors.ENDC}")
+            try:
+                sb_instance.driver.execute_script("arguments[0].click();", ep_el)
+            except Exception:
+                try:
+                    ep_el.click()
+                except Exception as e:
+                    print(f"{Bcolors.WARNING}Impossibile cliccare episodio {episode_index}: {e}{Bcolors.ENDC}")
+                    continue
+
+            # Attendi aggiornamento player
+            time.sleep(1.5)
+
+            m3u8_link = extract_m3u8_from_current_page(sb_instance, is_series=True, max_retries=max_retries)
+            if not m3u8_link:
+                print(f"{Bcolors.FAIL}M3U8 non trovato per S{season_index:02d}E{episode_index:02d}.{Bcolors.ENDC}")
+                continue
+
+            print(f"{Bcolors.HEADER}M3U8 trovato: {m3u8_link}{Bcolors.ENDC}")
+
+            ensure_dir(outdir)
+            out_name = f"{series_title} - Stagione {season_index:02d} - Episodio {episode_index:02d}.mp4"
+            out_path = outdir / sanitize_filename(out_name)
+
+            download_m3u8_to_mp4(m3u8_link, out_path)
+            # Ritardo tra i download per evitare rate limit
+            time.sleep(delay + random.uniform(0.5, 1.5))
+
+
 def get_m3u8_link_via_seleniumbase(sb_instance, content_url):
     """
     Naviga alla pagina del contenuto, trova l'iframe del player di selezione,
@@ -259,41 +514,51 @@ def get_m3u8_link_via_seleniumbase(sb_instance, content_url):
         # print(sb_instance.get_page_source()[:1000]) # Stampa solo i primi 1000 caratteri
         return None
 
+
 def main():
     """
     Funzione principale che esegue il programma.
     """
-    parser = argparse.ArgumentParser(description='Cerca e trova link .m3u8 per film e serie TV.')
-    parser.add_argument('--link', type=str, help='Inserisci il link diretto alla pagina del film o serie TV.')
+    parser = argparse.ArgumentParser(description='Cerca e scarica link .m3u8 per film e serie TV.')
+    parser.add_argument('--link', type=str, help='Link diretto alla pagina del film o serie TV.')
+    parser.add_argument('--seasons', type=str, default='all', help="Selezione stagioni: 'all' o lista/range es. '1,3-4'")
+    parser.add_argument('--episodes', type=str, default='all', help="Selezione episodi: 'all' o lista/range es. '1,5-10'")
+    parser.add_argument('--outdir', type=str, default=str(Path.cwd() / 'downloaded_files'), help='Directory di destinazione per i file MP4.')
+    parser.add_argument('--headless', action='store_true', help='Esegui il browser in headless (default).')
+    parser.add_argument('--no-headless', dest='headless', action='store_false', help='Mostra il browser (non headless).')
+    parser.set_defaults(headless=True)
+    parser.add_argument('--max-retries', type=int, default=3, help='Numero massimo di retry per estrazione m3u8.')
+    parser.add_argument('--delay', type=float, default=2.0, help='Ritardo tra i download (secondi).')
+
     args = parser.parse_args()
 
     content_link = args.link
-    m3u8_final_link = None 
+    m3u8_final_link = None
+
+    outdir = Path(args.outdir)
 
     # Inizializziamo SeleniumBase in modalità Undetected-Chromedriver per bypassare Cloudflare
-    # headless=False per vedere il browser in azione, utile per il debug.
-    with SB(uc=True, headless=True) as sb:
+    with SB(uc=True, headless=args.headless, incognito=True) as sb:
         if not content_link:
             print(f"{Bcolors.OKBLUE}Benvenuto! Inserisci il nome di un film o una serie TV:{Bcolors.ENDC}")
             title = input()
-            
-            results = search_content_sb(sb, title) 
-            
+
+            results = search_content_sb(sb, title)
+
             if not results:
                 print(f"{Bcolors.FAIL}Nessun risultato trovato per '{title}'.{Bcolors.ENDC}")
                 sys.exit()
-                
+
             print("\n--- Risultati della ricerca ---")
-            # Calcola le larghezze delle colonne in modo dinamico
             max_len = max(len(r['title']) for r in results) if results else 0
             name_col_width = max(max_len, len("Name"))
             type_col_width = max(len("Serie TV"), len("Type"))
-            table_width = name_col_width + len("Index") + type_col_width + 8 # 8 per margini e barre
-            
+            table_width = name_col_width + len("Index") + type_col_width + 8
+
             print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
             print(f"{Bcolors.OKCYAN}| {'Index':<5} | {'Name':<{name_col_width}} | {'Type':<{type_col_width}} |{Bcolors.ENDC}")
             print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
-            
+
             colors = [Bcolors.FAIL, Bcolors.OKGREEN, Bcolors.WARNING, Bcolors.OKBLUE, Bcolors.HEADER, Bcolors.OKCYAN]
             for i, result in enumerate(results):
                 color = colors[i % len(colors)]
@@ -306,7 +571,7 @@ def main():
                     if selection.lower() == 'q':
                         print("Uscita...")
                         sys.exit()
-                    
+
                     index = int(selection) - 1
                     if 0 <= index < len(results):
                         content_link = results[index]['link']
@@ -315,17 +580,33 @@ def main():
                         print(f"{Bcolors.FAIL}Selezione non valida. Inserisci un numero tra 1 e {len(results)}.{Bcolors.ENDC}")
                 except ValueError:
                     print(f"{Bcolors.FAIL}Input non valido. Inserisci un numero.{Bcolors.ENDC}")
-        
+
         if content_link:
-            m3u8_final_link = get_m3u8_link_via_seleniumbase(sb, content_link) 
-            
-            if m3u8_final_link:
-                print(f"\n{Bcolors.HEADER}--- LINK .m3u8 FINALE TROVATO ---{Bcolors.ENDC}")
-                print(f"{Bcolors.OKGREEN}{m3u8_final_link}{Bcolors.ENDC}")
+            if "/serietv/" in content_link:
+                enumerate_and_download_series(
+                    sb_instance=sb,
+                    series_url=content_link,
+                    seasons_arg=args.seasons,
+                    episodes_arg=args.episodes,
+                    outdir=outdir,
+                    max_retries=args.max_retries,
+                    delay=args.delay,
+                )
             else:
-                print(f"{Bcolors.FAIL}Impossibile trovare il link .m3u8 finale.{Bcolors.ENDC}")
-            
+                # Film singolo
+                m3u8_final_link = get_m3u8_link_via_seleniumbase(sb, content_link)
+                if m3u8_final_link:
+                    print(f"\n{Bcolors.HEADER}--- LINK .m3u8 FINALE TROVATO ---{Bcolors.ENDC}")
+                    print(f"{Bcolors.OKGREEN}{m3u8_final_link}{Bcolors.ENDC}")
+                    # Prova download film
+                    page_title = sanitize_filename(get_series_title_from_page(sb))
+                    ensure_dir(outdir)
+                    out_path = outdir / f"{page_title or 'Film'}.mp4"
+                    download_m3u8_to_mp4(m3u8_final_link, out_path)
+                else:
+                    print(f"{Bcolors.FAIL}Impossibile trovare il link .m3u8 finale.{Bcolors.ENDC}")
+
         print("\n--- Fine del programma ---")
-        # input(f"{Bcolors.OKBLUE}Premi Invio nel terminale per chiudere il browser...{Bcolors.ENDC}")
+
 if __name__ == "__main__":
     main()
