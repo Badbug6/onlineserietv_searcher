@@ -19,6 +19,12 @@ import shutil
 from pathlib import Path
 import random
 from tqdm import tqdm
+import platform
+import zipfile
+import tarfile
+import tempfile
+import logging
+from io import BytesIO
 
 
 # --- OPZIONI DI DEBUG ---
@@ -43,6 +49,8 @@ class Bcolors:
 BASE_URL = "https://onlineserietv.com"
 SEARCH_URL = f"{BASE_URL}/?s="
 PROGRESS_BAR_COLOR = "cyan"  # colore barra tqdm (se supportato)
+FFMPEG_BIN_PATH: str | None = None
+FFPROBE_BIN_PATH: str | None = None
 
 # =========================================================================
 # Funzioni principali per la ricerca e l'estrazione del link
@@ -184,21 +192,124 @@ def parse_selection_arg(arg_value: str):
                 continue
     return selected if selected else "all"
 
+def _download_file(url: str, dest_path: Path) -> None:
+    with requests.get(url, stream=True, impersonate='chrome110') as r:
+        r.raise_for_status()
+        total = int(r.headers.get('content-length', 0))
+        with open(dest_path, 'wb') as f, tqdm(total=total, unit='B', unit_scale=True, desc=f"Scarico {dest_path.name}") as pbar:
+            for chunk in r.iter_bytes(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    pbar.update(len(chunk))
+
+
+def _extract_archive(archive_path: Path, target_dir: Path) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    name = archive_path.name.lower()
+    if name.endswith('.zip'):
+        with zipfile.ZipFile(archive_path, 'r') as zf:
+            zf.extractall(target_dir)
+    elif name.endswith('.tar.gz') or name.endswith('.tgz'):
+        with tarfile.open(archive_path, 'r:gz') as tf:
+            tf.extractall(target_dir)
+    else:
+        raise RuntimeError(f"Archivio non supportato: {archive_path.name}")
+
+
+def _resolve_ffmpeg_binaries(bin_root: Path) -> tuple[str | None, str | None]:
+    ffmpeg_path = None
+    ffprobe_path = None
+    for root, _, files in os.walk(bin_root):
+        for fn in files:
+            low = fn.lower()
+            if low in ("ffmpeg", "ffmpeg.exe"):
+                ffmpeg_path = str(Path(root) / fn)
+            elif low in ("ffprobe", "ffprobe.exe"):
+                ffprobe_path = str(Path(root) / fn)
+    return ffmpeg_path, ffprobe_path
+
+
 def ensure_ffmpeg() -> bool:
-    if shutil.which("ffmpeg"):
+    global FFMPEG_BIN_PATH, FFPROBE_BIN_PATH
+    # Se già risolti
+    if FFMPEG_BIN_PATH and FFPROBE_BIN_PATH and Path(FFMPEG_BIN_PATH).exists() and Path(FFPROBE_BIN_PATH).exists():
         return True
-    print(f"{Bcolors.WARNING}ffmpeg non trovato nel sistema. Provo a installarlo...{Bcolors.ENDC}")
+
+    # 1) Prova PATH di sistema
+    sys_ffmpeg = shutil.which('ffmpeg')
+    sys_ffprobe = shutil.which('ffprobe')
+    if sys_ffmpeg and sys_ffprobe:
+        FFMPEG_BIN_PATH, FFPROBE_BIN_PATH = sys_ffmpeg, sys_ffprobe
+        return True
+
+    # 2) Prova cartella bin locale
+    bin_dir = Path.cwd() / 'bin'
+    ffmpeg_local, ffprobe_local = _resolve_ffmpeg_binaries(bin_dir)
+    if ffmpeg_local and ffprobe_local:
+        FFMPEG_BIN_PATH, FFPROBE_BIN_PATH = ffmpeg_local, ffprobe_local
+        return True
+
+    # 3) Scarica per OS/arch e prepara in bin/
+    os_name = platform.system().lower()
+    arch = platform.machine().lower()
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
     try:
-        # Best effort install via apt-get
-        subprocess.run(["bash", "-lc", "apt-get update -y && apt-get install -y ffmpeg"], check=True)
-        return shutil.which("ffmpeg") is not None
+        if os_name == 'windows':
+            # Link ufficiali gyan.dev build statiche
+            url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+            archive = bin_dir / 'ffmpeg.zip'
+            _download_file(url, archive)
+            _extract_archive(archive, bin_dir)
+            archive.unlink(missing_ok=True)
+        elif os_name == 'darwin':
+            # Mac: usa evermeet (universal)
+            url = 'https://evermeet.cx/ffmpeg/ffmpeg-6.1.1.zip'
+            archive = bin_dir / 'ffmpeg-mac.zip'
+            _download_file(url, archive)
+            _extract_archive(archive, bin_dir)
+            archive.unlink(missing_ok=True)
+            # ffprobe
+            url_probe = 'https://evermeet.cx/ffmpeg/ffprobe-6.1.1.zip'
+            archive2 = bin_dir / 'ffprobe-mac.zip'
+            _download_file(url_probe, archive2)
+            _extract_archive(archive2, bin_dir)
+            archive2.unlink(missing_ok=True)
+        else:
+            # Linux: JohnVanSickle static builds
+            url = 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz'
+            archive = bin_dir / 'ffmpeg-linux.tar.xz'
+            with requests.get(url, impersonate='chrome110') as r:
+                r.raise_for_status()
+                data = r.content
+            # estrazione .tar.xz in due step
+            tmp_xz = bin_dir / 'ffmpeg-linux.tar.xz'
+            tmp_xz.write_bytes(data)
+            with tarfile.open(tmp_xz, mode='r:xz') as tf:
+                tf.extractall(bin_dir)
+            tmp_xz.unlink(missing_ok=True)
+
+        # Risolvi binari dopo estrazione
+        ffmpeg_local, ffprobe_local = _resolve_ffmpeg_binaries(bin_dir)
+        if ffmpeg_local and ffprobe_local:
+            # Assicurati eseguibilità
+            try:
+                os.chmod(ffmpeg_local, 0o755)
+                os.chmod(ffprobe_local, 0o755)
+            except Exception:
+                pass
+            FFMPEG_BIN_PATH, FFPROBE_BIN_PATH = ffmpeg_local, ffprobe_local
+            return True
+        else:
+            print(f"{Bcolors.FAIL}Impossibile localizzare ffmpeg/ffprobe dopo il download.{Bcolors.ENDC}")
+            return False
     except Exception as e:
-        print(f"{Bcolors.FAIL}Impossibile installare ffmpeg automaticamente: {e}{Bcolors.ENDC}")
+        print(f"{Bcolors.FAIL}Download/estrazione ffmpeg fallita: {e}{Bcolors.ENDC}")
         return False
 
 def _probe_duration_seconds(m3u8_url: str, referer: str, user_agent: str) -> float | None:
     """Tenta di ottenere la durata (in secondi) via ffprobe. Restituisce None se non disponibile."""
-    ffprobe_path = shutil.which("ffprobe")
+    ffprobe_path = FFPROBE_BIN_PATH or shutil.which("ffprobe")
     if not ffprobe_path:
         return None
     try:
@@ -226,7 +337,7 @@ def download_m3u8_to_mp4(m3u8_url: str, output_file: Path, referer: str = "https
 
     # Comando ffmpeg con emissione progress
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-nostats",
+        (FFMPEG_BIN_PATH or "ffmpeg"), "-y", "-hide_banner", "-nostats",
         "-user_agent", user_agent,
         "-headers", f"Referer: {referer}\r\nOrigin: {referer}",
         "-i", m3u8_url,
@@ -240,7 +351,7 @@ def download_m3u8_to_mp4(m3u8_url: str, output_file: Path, referer: str = "https
     try:
         print(f"{Bcolors.OKBLUE}Scarico in MP4: {output_file.name}{Bcolors.ENDC}")
         # Se conosciamo la durata, mostriamo una barra con ETA
-        if total_duration and total_duration > 0:
+        if total_duration and total_duration > 0 and not getattr(sys.modules[__name__], 'DISABLE_PROGRESS', False):
             bar_kwargs = dict(
                 total=int(total_duration),
                 unit="s",
@@ -685,8 +796,22 @@ def main():
     parser.set_defaults(headless=True)
     parser.add_argument('--max-retries', type=int, default=3, help='Numero massimo di retry per estrazione m3u8.')
     parser.add_argument('--delay', type=float, default=2.0, help='Ritardo tra i download (secondi).')
+    parser.add_argument('--color', type=str, default=None, help='Colore barra progresso (es. cyan, green, yellow).')
+    parser.add_argument('--no-progress', action='store_true', help='Disabilita la barra di avanzamento.')
+    parser.add_argument('--log-file', type=str, default=None, help='Scrive log dettagliati su file.')
 
     args = parser.parse_args()
+
+    # Setup logging
+    if args.log_file:
+        logging.basicConfig(filename=args.log_file, level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+
+    global PROGRESS_BAR_COLOR
+    if args.color:
+        PROGRESS_BAR_COLOR = args.color
+    # Disabilita progress se richiesto
+    global DISABLE_PROGRESS
+    DISABLE_PROGRESS = bool(args.no_progress)
 
     content_link = args.link
     m3u8_final_link = None

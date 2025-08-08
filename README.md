@@ -65,8 +65,11 @@ Script Python per cercare, aprire e scaricare flussi video (.m3u8) da pagine di 
 - `--headless` / `--no-headless`: esegue il browser senza/with GUI (default headless).
 - `--max-retries` (int, default 3): tentativi massimi per l’estrazione del link `.m3u8` dal player.
 - `--delay` (float, default 2.0): ritardo tra i download degli episodi (aiuta a evitare rate-limit).
+ - `--color` (string): colore della barra progresso (`cyan`, `green`, `yellow`, ecc.).
+ - `--no-progress` (flag): disabilita la barra di avanzamento.
+ - `--log-file` (string): scrive un log dettagliato su file.
 
-Nota: il colore della barra di avanzamento è configurabile nel codice tramite la variabile `PROGRESS_BAR_COLOR` in `main.py`.
+Nota: puoi anche impostare `--color` per cambiare al volo il colore della barra (oltre alla variabile `PROGRESS_BAR_COLOR` in `main.py`).
 
 ## Esempi
 - Scaricare tutte le stagioni/episodi di una serie in GUI visibile:
@@ -77,6 +80,14 @@ Nota: il colore della barra di avanzamento è configurabile nel codice tramite l
   ```bash
   python main.py --link "https://onlineserietv.com/serietv/…" --seasons 2 --episodes 1-3,6
   ```
+ - Impostare colore e/o disattivare barra:
+   ```bash
+   python main.py --link "https://onlineserietv.com/film/..." --color cyan --no-progress
+   ```
+ - Scrivere log su file:
+   ```bash
+   python main.py --link "..." --log-file run.log
+   ```
 
 ## Come funziona (alto livello)
 1. Apertura pagina contenuto (film/serie) con SeleniumBase in modalità UC (bypass Cloudflare).
@@ -87,6 +98,11 @@ Nota: il colore della barra di avanzamento è configurabile nel codice tramite l
 4. Estrazione `.m3u8`: lo script offuscato nel player viene “beautificato” con `jsbeautifier` e si legge il valore `sources[0].src` via regex.
 5. Download: si stima la durata con `ffprobe` (se possibile) e si scarica con `ffmpeg -c copy` mostrando una barra `tqdm` in secondi con ETA; in caso contrario, si procede senza barra.
 6. Output: salvataggio MP4 con nome ripulito nella struttura `Video/Serie/...` o `Video/Movie/...` come sopra.
+
+### Gestione automatica di ffmpeg/ffprobe
+- Se `ffmpeg`/`ffprobe` non sono nel PATH, lo script scarica automaticamente build precompilate nella cartella `bin/` accanto allo script (Windows/macOS/Linux), assegna i permessi di esecuzione e usa quei binari.
+- Gli archivi temporanei (zip/tar.xz) vengono eliminati dopo l’estrazione.
+- In assenza di connessione o se il download fallisce, installa manualmente `ffmpeg`/`ffprobe` oppure posiziona i binari dentro `bin/`.
 
 ## Struttura dei file di output
 
