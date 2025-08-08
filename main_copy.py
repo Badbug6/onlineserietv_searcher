@@ -11,10 +11,6 @@ import urllib.parse
 import argparse
 import sys
 import time
-# NUOVE DIPENDENZE: Assicurati di averle installate con:
-# pip install curl_cffi jsbeautifier
-# La libreria curl_cffi non è più necessaria per l'estrazione finale,
-# ma la manteniamo per completezza se volessi usarla altrove.
 from curl_cffi import requests 
 import jsbeautifier
 import os
@@ -23,6 +19,12 @@ import shutil
 from pathlib import Path
 import random
 from tqdm import tqdm
+import platform
+import zipfile
+import tarfile
+import tempfile
+import logging
+from io import BytesIO
 
 
 # --- OPZIONI DI DEBUG ---
@@ -46,6 +48,9 @@ class Bcolors:
 # Variabili globali per la configurazione del sito
 BASE_URL = "https://onlineserietv.com"
 SEARCH_URL = f"{BASE_URL}/?s="
+PROGRESS_BAR_COLOR = "cyan"  # colore barra tqdm (se supportato)
+FFMPEG_BIN_PATH: str | None = None
+FFPROBE_BIN_PATH: str | None = None
 
 # =========================================================================
 # Funzioni principali per la ricerca e l'estrazione del link
@@ -68,14 +73,14 @@ def search_content_sb(sb_instance, title):
     
     try:
         sb_instance.open(url)
-        # Attende i risultati o Cloudflare. Aumentato il timeout per maggiore robustezza.
         sb_instance.wait_for_element("div#box_movies", timeout=45) 
         print(f"{Bcolors.OKGREEN}Pagina dei risultati caricata con successo.{Bcolors.ENDC}")
     except Exception as e:
-        print(f"{Bcolors.FAIL}Errore nella ricerca o risoluzione Cloudflare: {e}{Bcolors.ENDC}")
         page_source_on_fail = sb_instance.get_page_source()
-        if "cloudflare" in page_source_on_fail.lower() or "just a moment" in page_source_on_fail.lower():
-            print("Diagnosi: Sembra che Cloudflare CAPTCHA sia ancora attivo o ci sia stato un blocco.")
+        if "500 Internal Server Error" in page_source_on_fail or "Errore 500" in page_source_on_fail:
+            print(f"{Bcolors.FAIL}Errore 500 dal sito: riprova più tardi o cambia ricerca.{Bcolors.ENDC}")
+        else:
+            print(f"{Bcolors.FAIL}Errore nella ricerca o risoluzione Cloudflare: {e}{Bcolors.ENDC}")
         return []
 
     page_source = sb_instance.get_page_source()
@@ -94,14 +99,12 @@ def search_content_sb(sb_instance, title):
             # Se l'URL contiene "/serietv/", lo classifica come "Serie TV".
             # Altrimenti, lo classifica come "Film".
             content_type = "Serie TV" if "/serietv/" in link_url else "Film"
-            
-            # Filtra i risultati per includere solo quelli che contengono il titolo cercato
-            if title.lower() in title_text.lower():
-                results.append({
-                    'title': title_text,
-                    'link': link_url,
-                    'type': content_type
-                })
+            # Mostra tutti i risultati trovati, anche se il titolo non è identico
+            results.append({
+                'title': title_text,
+                'link': link_url,
+                'type': content_type
+            })
     
     return results
 
@@ -187,21 +190,124 @@ def parse_selection_arg(arg_value: str):
                 continue
     return selected if selected else "all"
 
+def _download_file(url: str, dest_path: Path) -> None:
+    with requests.get(url, stream=True, impersonate='chrome110') as r:
+        r.raise_for_status()
+        total = int(r.headers.get('content-length', 0))
+        with open(dest_path, 'wb') as f, tqdm(total=total, unit='B', unit_scale=True, desc=f"Scarico {dest_path.name}") as pbar:
+            for chunk in r.iter_bytes(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    pbar.update(len(chunk))
+
+
+def _extract_archive(archive_path: Path, target_dir: Path) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    name = archive_path.name.lower()
+    if name.endswith('.zip'):
+        with zipfile.ZipFile(archive_path, 'r') as zf:
+            zf.extractall(target_dir)
+    elif name.endswith('.tar.gz') or name.endswith('.tgz'):
+        with tarfile.open(archive_path, 'r:gz') as tf:
+            tf.extractall(target_dir)
+    else:
+        raise RuntimeError(f"Archivio non supportato: {archive_path.name}")
+
+
+def _resolve_ffmpeg_binaries(bin_root: Path) -> tuple[str | None, str | None]:
+    ffmpeg_path = None
+    ffprobe_path = None
+    for root, _, files in os.walk(bin_root):
+        for fn in files:
+            low = fn.lower()
+            if low in ("ffmpeg", "ffmpeg.exe"):
+                ffmpeg_path = str(Path(root) / fn)
+            elif low in ("ffprobe", "ffprobe.exe"):
+                ffprobe_path = str(Path(root) / fn)
+    return ffmpeg_path, ffprobe_path
+
+
 def ensure_ffmpeg() -> bool:
-    if shutil.which("ffmpeg"):
+    global FFMPEG_BIN_PATH, FFPROBE_BIN_PATH
+    # Se già risolti
+    if FFMPEG_BIN_PATH and FFPROBE_BIN_PATH and Path(FFMPEG_BIN_PATH).exists() and Path(FFPROBE_BIN_PATH).exists():
         return True
-    print(f"{Bcolors.WARNING}ffmpeg non trovato nel sistema. Provo a installarlo...{Bcolors.ENDC}")
+
+    # 1) Prova PATH di sistema
+    sys_ffmpeg = shutil.which('ffmpeg')
+    sys_ffprobe = shutil.which('ffprobe')
+    if sys_ffmpeg and sys_ffprobe:
+        FFMPEG_BIN_PATH, FFPROBE_BIN_PATH = sys_ffmpeg, sys_ffprobe
+        return True
+
+    # 2) Prova cartella bin locale
+    bin_dir = Path.cwd() / 'bin'
+    ffmpeg_local, ffprobe_local = _resolve_ffmpeg_binaries(bin_dir)
+    if ffmpeg_local and ffprobe_local:
+        FFMPEG_BIN_PATH, FFPROBE_BIN_PATH = ffmpeg_local, ffprobe_local
+        return True
+
+    # 3) Scarica per OS/arch e prepara in bin/
+    os_name = platform.system().lower()
+    arch = platform.machine().lower()
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
     try:
-        # Best effort install via apt-get
-        subprocess.run(["bash", "-lc", "apt-get update -y && apt-get install -y ffmpeg"], check=True)
-        return shutil.which("ffmpeg") is not None
+        if os_name == 'windows':
+            # Link ufficiali gyan.dev build statiche
+            url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+            archive = bin_dir / 'ffmpeg.zip'
+            _download_file(url, archive)
+            _extract_archive(archive, bin_dir)
+            archive.unlink(missing_ok=True)
+        elif os_name == 'darwin':
+            # Mac: usa evermeet (universal)
+            url = 'https://evermeet.cx/ffmpeg/ffmpeg-6.1.1.zip'
+            archive = bin_dir / 'ffmpeg-mac.zip'
+            _download_file(url, archive)
+            _extract_archive(archive, bin_dir)
+            archive.unlink(missing_ok=True)
+            # ffprobe
+            url_probe = 'https://evermeet.cx/ffmpeg/ffprobe-6.1.1.zip'
+            archive2 = bin_dir / 'ffprobe-mac.zip'
+            _download_file(url_probe, archive2)
+            _extract_archive(archive2, bin_dir)
+            archive2.unlink(missing_ok=True)
+        else:
+            # Linux: JohnVanSickle static builds
+            url = 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz'
+            archive = bin_dir / 'ffmpeg-linux.tar.xz'
+            with requests.get(url, impersonate='chrome110') as r:
+                r.raise_for_status()
+                data = r.content
+            # estrazione .tar.xz in due step
+            tmp_xz = bin_dir / 'ffmpeg-linux.tar.xz'
+            tmp_xz.write_bytes(data)
+            with tarfile.open(tmp_xz, mode='r:xz') as tf:
+                tf.extractall(bin_dir)
+            tmp_xz.unlink(missing_ok=True)
+
+        # Risolvi binari dopo estrazione
+        ffmpeg_local, ffprobe_local = _resolve_ffmpeg_binaries(bin_dir)
+        if ffmpeg_local and ffprobe_local:
+            # Assicurati eseguibilità
+            try:
+                os.chmod(ffmpeg_local, 0o755)
+                os.chmod(ffprobe_local, 0o755)
+            except Exception:
+                pass
+            FFMPEG_BIN_PATH, FFPROBE_BIN_PATH = ffmpeg_local, ffprobe_local
+            return True
+        else:
+            print(f"{Bcolors.FAIL}Impossibile localizzare ffmpeg/ffprobe dopo il download.{Bcolors.ENDC}")
+            return False
     except Exception as e:
-        print(f"{Bcolors.FAIL}Impossibile installare ffmpeg automaticamente: {e}{Bcolors.ENDC}")
+        print(f"{Bcolors.FAIL}Download/estrazione ffmpeg fallita: {e}{Bcolors.ENDC}")
         return False
 
 def _probe_duration_seconds(m3u8_url: str, referer: str, user_agent: str) -> float | None:
     """Tenta di ottenere la durata (in secondi) via ffprobe. Restituisce None se non disponibile."""
-    ffprobe_path = shutil.which("ffprobe")
+    ffprobe_path = FFPROBE_BIN_PATH or shutil.which("ffprobe")
     if not ffprobe_path:
         return None
     try:
@@ -229,7 +335,7 @@ def download_m3u8_to_mp4(m3u8_url: str, output_file: Path, referer: str = "https
 
     # Comando ffmpeg con emissione progress
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-nostats",
+        (FFMPEG_BIN_PATH or "ffmpeg"), "-y", "-hide_banner", "-nostats",
         "-user_agent", user_agent,
         "-headers", f"Referer: {referer}\r\nOrigin: {referer}",
         "-i", m3u8_url,
@@ -243,8 +349,21 @@ def download_m3u8_to_mp4(m3u8_url: str, output_file: Path, referer: str = "https
     try:
         print(f"{Bcolors.OKBLUE}Scarico in MP4: {output_file.name}{Bcolors.ENDC}")
         # Se conosciamo la durata, mostriamo una barra con ETA
-        if total_duration and total_duration > 0:
-            with tqdm(total=int(total_duration), unit="s", unit_scale=False, desc=output_file.name, dynamic_ncols=True) as pbar:
+        if total_duration and total_duration > 0 and not getattr(sys.modules[__name__], 'DISABLE_PROGRESS', False):
+            bar_kwargs = dict(
+                total=int(total_duration),
+                unit="s",
+                unit_scale=False,
+                desc=f"{Bcolors.OKCYAN}{output_file.name}{Bcolors.ENDC}",
+                dynamic_ncols=True,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}s  ETA {remaining}"
+            )
+            try:
+                pbar = tqdm(colour=PROGRESS_BAR_COLOR, **bar_kwargs)
+            except TypeError:
+                # tqdm più vecchio: niente 'colour'
+                pbar = tqdm(**bar_kwargs)
+            try:
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
                 current_sec = 0
                 for line in proc.stdout:
@@ -272,6 +391,8 @@ def download_m3u8_to_mp4(m3u8_url: str, output_file: Path, referer: str = "https
                 proc.wait()
                 if proc.returncode != 0:
                     raise subprocess.CalledProcessError(proc.returncode, cmd)
+            finally:
+                pbar.close()
         else:
             # Fallback: nessuna durata → esecuzione senza barra
             subprocess.run(cmd, check=True)
@@ -533,9 +654,11 @@ def enumerate_and_download_series(sb_instance: SB, series_url: str, seasons_arg,
             continue
 
         print(f"{Bcolors.HEADER}M3U8 trovato: {m3u8_link}{Bcolors.ENDC}")
-        ensure_dir(outdir)
+        # Struttura: <outdir>/Serie/<Serie>/Sxx/
+        season_dir = outdir / "Serie" / series_title / f"S{s_num:02d}"
+        ensure_dir(season_dir)
         out_name = f"{series_title} - Stagione {s_num:02d} - Episodio {e_num:02d}.mp4"
-        out_path = outdir / sanitize_filename(out_name)
+        out_path = season_dir / sanitize_filename(out_name)
         download_m3u8_to_mp4(m3u8_link, out_path)
         time.sleep(delay + random.uniform(0.5, 1.5))
 
@@ -665,14 +788,28 @@ def main():
     parser.add_argument('--link', type=str, help='Link diretto alla pagina del film o serie TV.')
     parser.add_argument('--seasons', type=str, default='all', help="Selezione stagioni: 'all' o lista/range es. '1,3-4'")
     parser.add_argument('--episodes', type=str, default='all', help="Selezione episodi: 'all' o lista/range es. '1,5-10'")
-    parser.add_argument('--outdir', type=str, default=str(Path.cwd() / 'downloaded_files'), help='Directory di destinazione per i file MP4.')
+    parser.add_argument('--outdir', type=str, default=str(Path.cwd() / 'Video'), help="Directory base di destinazione. Verranno creati: 'Serie/<Titolo>/Sxx' per le serie e 'Movie/<Titolo>' per i film.")
     parser.add_argument('--headless', action='store_true', help='Esegui il browser in headless (default).')
     parser.add_argument('--no-headless', dest='headless', action='store_false', help='Mostra il browser (non headless).')
     parser.set_defaults(headless=True)
     parser.add_argument('--max-retries', type=int, default=3, help='Numero massimo di retry per estrazione m3u8.')
     parser.add_argument('--delay', type=float, default=2.0, help='Ritardo tra i download (secondi).')
+    parser.add_argument('--color', type=str, default=None, help='Colore barra progresso (es. cyan, green, yellow).')
+    parser.add_argument('--no-progress', action='store_true', help='Disabilita la barra di avanzamento.')
+    parser.add_argument('--log-file', type=str, default=None, help='Scrive log dettagliati su file.')
 
     args = parser.parse_args()
+
+    # Setup logging
+    if args.log_file:
+        logging.basicConfig(filename=args.log_file, level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+
+    global PROGRESS_BAR_COLOR
+    if args.color:
+        PROGRESS_BAR_COLOR = args.color
+    # Disabilita progress se richiesto
+    global DISABLE_PROGRESS
+    DISABLE_PROGRESS = bool(args.no_progress)
 
     content_link = args.link
     m3u8_final_link = None
@@ -692,20 +829,17 @@ def main():
                 sys.exit()
 
             print("\n--- Risultati della ricerca ---")
-            max_len = max(len(r['title']) for r in results) if results else 0
-            name_col_width = max(max_len, len("Name"))
-            type_col_width = max(len("Serie TV"), len("Type"))
-            table_width = name_col_width + len("Index") + type_col_width + 8
+            name_col_width = max(max(len(r['title']) for r in results), len("Name"))
+            type_col_width = max(max(len(r['type']) for r in results), len("Type"))
+            table_width = 7 + name_col_width + 3 + type_col_width + 3
 
-            print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
+            print(f"{Bcolors.HEADER}{'-' * table_width}{Bcolors.ENDC}")
             print(f"{Bcolors.OKCYAN}| {'Index':<5} | {'Name':<{name_col_width}} | {'Type':<{type_col_width}} |{Bcolors.ENDC}")
-            print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
-
-            colors = [Bcolors.FAIL, Bcolors.OKGREEN, Bcolors.WARNING, Bcolors.OKBLUE, Bcolors.HEADER, Bcolors.OKCYAN]
+            print(f"{Bcolors.HEADER}{'-' * table_width}{Bcolors.ENDC}")
             for i, result in enumerate(results):
-                color = colors[i % len(colors)]
-                print(f"| {color}{i+1:<5}{Bcolors.ENDC} | {color}{result['title']:<{name_col_width}}{Bcolors.ENDC} | {color}{result['type']:<{type_col_width}}{Bcolors.ENDC} |")
-            print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
+                color = Bcolors.OKGREEN if result['type'] == "Serie TV" else Bcolors.WARNING
+                print(f"{color}| {i+1:<5} | {result['title']:<{name_col_width}} | {result['type']:<{type_col_width}} |{Bcolors.ENDC}")
+            print(f"{Bcolors.HEADER}{'-' * table_width}{Bcolors.ENDC}")
 
             while True:
                 try:
@@ -724,12 +858,71 @@ def main():
                     print(f"{Bcolors.FAIL}Input non valido. Inserisci un numero.{Bcolors.ENDC}")
 
         if content_link:
-            if "/serietv/" in content_link:
+            if "/serietv/" in content_link and args.seasons == "all" and args.episodes == "all":
+                # --- SELEZIONE INTERATTIVA STAGIONI ---
+                sb.open(content_link)
+                sb.wait_for_ready_state_complete()
+                try:
+                    selection_iframe_selector = "iframe[src*='streaming-serie-tv']"
+                    sb.wait_for_element_present(selection_iframe_selector, timeout=25)
+                    player_iframe_element = sb.find_element(selection_iframe_selector)
+                    selection_page_url = player_iframe_element.get_attribute("src")
+                except Exception as e:
+                    print(f"{Bcolors.FAIL}Impossibile rilevare l'iframe delle stagioni/episodi: {e}{Bcolors.ENDC}")
+                    sys.exit()
+
+                sb.open(selection_page_url)
+                sb.wait_for_ready_state_complete()
+                soup_seasons = BeautifulSoup(sb.get_page_source(), 'html.parser')
+                season_links = soup_seasons.select('div.div_seasons a[href*="/streaming-serie-tv/"]')
+
+                if not season_links:
+                    print(f"{Bcolors.FAIL}Nessuna stagione trovata.{Bcolors.ENDC}")
+                    sys.exit()
+
+                print("\n--- Stagioni disponibili ---")
+                stag_col_width = max(len(a.text.strip() or f"Stagione {idx+1}") for idx, a in enumerate(season_links))
+                print(f"{Bcolors.HEADER}{'-' * (11 + stag_col_width)}{Bcolors.ENDC}")
+                print(f"{Bcolors.OKCYAN}| {'Num':<3} | {'Stagione':<{stag_col_width}} |{Bcolors.ENDC}")
+                print(f"{Bcolors.HEADER}{'-' * (11 + stag_col_width)}{Bcolors.ENDC}")
+                for idx, a in enumerate(season_links):
+                    txt = a.text.strip() or f"Stagione {idx+1}"
+                    print(f"{Bcolors.OKGREEN}| {idx+1:<3} | {txt:<{stag_col_width}} |{Bcolors.ENDC}")
+                print(f"{Bcolors.HEADER}{'-' * (11 + stag_col_width)}{Bcolors.ENDC}")
+
+                sel = input(f"{Bcolors.OKBLUE}Seleziona le stagioni da scaricare (es. 1,3-4 o 'all'): {Bcolors.ENDC}")
+                seasons_arg = sel.strip() or "all"
+
+                # --- SELEZIONE INTERATTIVA EPISODI ---
+                episodes_arg = "all"
+                if seasons_arg != "all":
+                    try:
+                        sel_idx = [int(s) for s in seasons_arg.replace(" ", "").split(",") if s.isdigit()]
+                        if len(sel_idx) == 1:
+                            # Se una sola stagione, chiedi quali episodi
+                            sb.open(season_links[sel_idx[0]-1].get('href'))
+                            sb.wait_for_ready_state_complete()
+                            soup_eps = BeautifulSoup(sb.get_page_source(), 'html.parser')
+                            ep_links = soup_eps.select('div.div_episodes a[href*="/streaming-serie-tv/"]')
+                            print("\n--- Episodi disponibili ---")
+                            ep_col_width = max(len(ep_a.text.strip() or f"Episodio {eidx+1}") for eidx, ep_a in enumerate(ep_links))
+                            print(f"{Bcolors.HEADER}{'-' * (13 + ep_col_width)}{Bcolors.ENDC}")
+                            print(f"{Bcolors.OKCYAN}| {'Num':<4} | {'Episodio':<{ep_col_width}} |{Bcolors.ENDC}")
+                            print(f"{Bcolors.HEADER}{'-' * (13 + ep_col_width)}{Bcolors.ENDC}")
+                            for eidx, ep_a in enumerate(ep_links):
+                                etxt = ep_a.text.strip() or f"Episodio {eidx+1}"
+                                print(f"{Bcolors.OKGREEN}| {eidx+1:<4} | {etxt:<{ep_col_width}} |{Bcolors.ENDC}")
+                            print(f"{Bcolors.HEADER}{'-' * (13 + ep_col_width)}{Bcolors.ENDC}")
+                            epsel = input(f"{Bcolors.OKBLUE}Seleziona gli episodi da scaricare (es. 1,3-5 o 'all'): {Bcolors.ENDC}")
+                            episodes_arg = epsel.strip() or "all"
+                    except Exception:
+                        pass
+
                 enumerate_and_download_series(
                     sb_instance=sb,
                     series_url=content_link,
-                    seasons_arg=args.seasons,
-                    episodes_arg=args.episodes,
+                    seasons_arg=seasons_arg,
+                    episodes_arg=episodes_arg,
                     outdir=outdir,
                     max_retries=args.max_retries,
                     delay=args.delay,
@@ -742,8 +935,9 @@ def main():
                     print(f"{Bcolors.OKGREEN}{m3u8_final_link}{Bcolors.ENDC}")
                     # Prova download film
                     page_title = sanitize_filename(get_series_title_from_page(sb))
-                    ensure_dir(outdir)
-                    out_path = outdir / f"{page_title or 'Film'}.mp4"
+                    movie_dir = outdir / "Movie" / (page_title or 'Film')
+                    ensure_dir(movie_dir)
+                    out_path = movie_dir / f"{page_title or 'Film'}.mp4"
                     download_m3u8_to_mp4(m3u8_final_link, out_path)
                 else:
                     print(f"{Bcolors.FAIL}Impossibile trovare il link .m3u8 finale.{Bcolors.ENDC}")

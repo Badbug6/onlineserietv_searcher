@@ -73,14 +73,14 @@ def search_content_sb(sb_instance, title):
     
     try:
         sb_instance.open(url)
-        # Attende i risultati o Cloudflare. Aumentato il timeout per maggiore robustezza.
         sb_instance.wait_for_element("div#box_movies", timeout=45) 
         print(f"{Bcolors.OKGREEN}Pagina dei risultati caricata con successo.{Bcolors.ENDC}")
     except Exception as e:
-        print(f"{Bcolors.FAIL}Errore nella ricerca o risoluzione Cloudflare: {e}{Bcolors.ENDC}")
         page_source_on_fail = sb_instance.get_page_source()
-        if "cloudflare" in page_source_on_fail.lower() or "just a moment" in page_source_on_fail.lower():
-            print("Diagnosi: Sembra che Cloudflare CAPTCHA sia ancora attivo o ci sia stato un blocco.")
+        if "500 Internal Server Error" in page_source_on_fail or "Errore 500" in page_source_on_fail:
+            print(f"{Bcolors.FAIL}Errore 500 dal sito: riprova più tardi o cambia ricerca.{Bcolors.ENDC}")
+        else:
+            print(f"{Bcolors.FAIL}Errore nella ricerca o risoluzione Cloudflare: {e}{Bcolors.ENDC}")
         return []
 
     page_source = sb_instance.get_page_source()
@@ -99,14 +99,12 @@ def search_content_sb(sb_instance, title):
             # Se l'URL contiene "/serietv/", lo classifica come "Serie TV".
             # Altrimenti, lo classifica come "Film".
             content_type = "Serie TV" if "/serietv/" in link_url else "Film"
-            
-            # Filtra i risultati per includere solo quelli che contengono il titolo cercato
-            if title.lower() in title_text.lower():
-                results.append({
-                    'title': title_text,
-                    'link': link_url,
-                    'type': content_type
-                })
+            # Mostra tutti i risultati trovati, anche se il titolo non è identico
+            results.append({
+                'title': title_text,
+                'link': link_url,
+                'type': content_type
+            })
     
     return results
 
@@ -831,20 +829,17 @@ def main():
                 sys.exit()
 
             print("\n--- Risultati della ricerca ---")
-            max_len = max(len(r['title']) for r in results) if results else 0
-            name_col_width = max(max_len, len("Name"))
-            type_col_width = max(len("Serie TV"), len("Type"))
-            table_width = name_col_width + len("Index") + type_col_width + 8
+            name_col_width = max(max(len(r['title']) for r in results), len("Name"))
+            type_col_width = max(max(len(r['type']) for r in results), len("Type"))
+            table_width = 7 + name_col_width + 3 + type_col_width + 3
 
-            print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
+            print(f"{Bcolors.HEADER}{'-' * table_width}{Bcolors.ENDC}")
             print(f"{Bcolors.OKCYAN}| {'Index':<5} | {'Name':<{name_col_width}} | {'Type':<{type_col_width}} |{Bcolors.ENDC}")
-            print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
-
-            colors = [Bcolors.FAIL, Bcolors.OKGREEN, Bcolors.WARNING, Bcolors.OKBLUE, Bcolors.HEADER, Bcolors.OKCYAN]
+            print(f"{Bcolors.HEADER}{'-' * table_width}{Bcolors.ENDC}")
             for i, result in enumerate(results):
-                color = colors[i % len(colors)]
-                print(f"| {color}{i+1:<5}{Bcolors.ENDC} | {color}{result['title']:<{name_col_width}}{Bcolors.ENDC} | {color}{result['type']:<{type_col_width}}{Bcolors.ENDC} |")
-            print(f"{Bcolors.OKCYAN}{'-' * table_width}{Bcolors.ENDC}")
+                color = Bcolors.OKGREEN if result['type'] == "Serie TV" else Bcolors.WARNING
+                print(f"{color}| {i+1:<5} | {result['title']:<{name_col_width}} | {result['type']:<{type_col_width}} |{Bcolors.ENDC}")
+            print(f"{Bcolors.HEADER}{'-' * table_width}{Bcolors.ENDC}")
 
             while True:
                 try:
@@ -863,12 +858,71 @@ def main():
                     print(f"{Bcolors.FAIL}Input non valido. Inserisci un numero.{Bcolors.ENDC}")
 
         if content_link:
-            if "/serietv/" in content_link:
+            if "/serietv/" in content_link and args.seasons == "all" and args.episodes == "all":
+                # --- SELEZIONE INTERATTIVA STAGIONI ---
+                sb.open(content_link)
+                sb.wait_for_ready_state_complete()
+                try:
+                    selection_iframe_selector = "iframe[src*='streaming-serie-tv']"
+                    sb.wait_for_element_present(selection_iframe_selector, timeout=25)
+                    player_iframe_element = sb.find_element(selection_iframe_selector)
+                    selection_page_url = player_iframe_element.get_attribute("src")
+                except Exception as e:
+                    print(f"{Bcolors.FAIL}Impossibile rilevare l'iframe delle stagioni/episodi: {e}{Bcolors.ENDC}")
+                    sys.exit()
+
+                sb.open(selection_page_url)
+                sb.wait_for_ready_state_complete()
+                soup_seasons = BeautifulSoup(sb.get_page_source(), 'html.parser')
+                season_links = soup_seasons.select('div.div_seasons a[href*="/streaming-serie-tv/"]')
+
+                if not season_links:
+                    print(f"{Bcolors.FAIL}Nessuna stagione trovata.{Bcolors.ENDC}")
+                    sys.exit()
+
+                print("\n--- Stagioni disponibili ---")
+                stag_col_width = max(len(a.text.strip() or f"Stagione {idx+1}") for idx, a in enumerate(season_links))
+                print(f"{Bcolors.HEADER}{'-' * (11 + stag_col_width)}{Bcolors.ENDC}")
+                print(f"{Bcolors.OKCYAN}| {'Num':<3} | {'Stagione':<{stag_col_width}} |{Bcolors.ENDC}")
+                print(f"{Bcolors.HEADER}{'-' * (11 + stag_col_width)}{Bcolors.ENDC}")
+                for idx, a in enumerate(season_links):
+                    txt = a.text.strip() or f"Stagione {idx+1}"
+                    print(f"{Bcolors.OKGREEN}| {idx+1:<3} | {txt:<{stag_col_width}} |{Bcolors.ENDC}")
+                print(f"{Bcolors.HEADER}{'-' * (11 + stag_col_width)}{Bcolors.ENDC}")
+
+                sel = input(f"{Bcolors.OKBLUE}Seleziona le stagioni da scaricare (es. 1,3-4 o 'all'): {Bcolors.ENDC}")
+                seasons_arg = sel.strip() or "all"
+
+                # --- SELEZIONE INTERATTIVA EPISODI ---
+                episodes_arg = "all"
+                if seasons_arg != "all":
+                    try:
+                        sel_idx = [int(s) for s in seasons_arg.replace(" ", "").split(",") if s.isdigit()]
+                        if len(sel_idx) == 1:
+                            # Se una sola stagione, chiedi quali episodi
+                            sb.open(season_links[sel_idx[0]-1].get('href'))
+                            sb.wait_for_ready_state_complete()
+                            soup_eps = BeautifulSoup(sb.get_page_source(), 'html.parser')
+                            ep_links = soup_eps.select('div.div_episodes a[href*="/streaming-serie-tv/"]')
+                            print("\n--- Episodi disponibili ---")
+                            ep_col_width = max(len(ep_a.text.strip() or f"Episodio {eidx+1}") for eidx, ep_a in enumerate(ep_links))
+                            print(f"{Bcolors.HEADER}{'-' * (13 + ep_col_width)}{Bcolors.ENDC}")
+                            print(f"{Bcolors.OKCYAN}| {'Num':<4} | {'Episodio':<{ep_col_width}} |{Bcolors.ENDC}")
+                            print(f"{Bcolors.HEADER}{'-' * (13 + ep_col_width)}{Bcolors.ENDC}")
+                            for eidx, ep_a in enumerate(ep_links):
+                                etxt = ep_a.text.strip() or f"Episodio {eidx+1}"
+                                print(f"{Bcolors.OKGREEN}| {eidx+1:<4} | {etxt:<{ep_col_width}} |{Bcolors.ENDC}")
+                            print(f"{Bcolors.HEADER}{'-' * (13 + ep_col_width)}{Bcolors.ENDC}")
+                            epsel = input(f"{Bcolors.OKBLUE}Seleziona gli episodi da scaricare (es. 1,3-5 o 'all'): {Bcolors.ENDC}")
+                            episodes_arg = epsel.strip() or "all"
+                    except Exception:
+                        pass
+
                 enumerate_and_download_series(
                     sb_instance=sb,
                     series_url=content_link,
-                    seasons_arg=args.seasons,
-                    episodes_arg=args.episodes,
+                    seasons_arg=seasons_arg,
+                    episodes_arg=episodes_arg,
                     outdir=outdir,
                     max_retries=args.max_retries,
                     delay=args.delay,
