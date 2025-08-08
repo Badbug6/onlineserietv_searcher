@@ -11,10 +11,6 @@ import urllib.parse
 import argparse
 import sys
 import time
-# NUOVE DIPENDENZE: Assicurati di averle installate con:
-# pip install curl_cffi jsbeautifier
-# La libreria curl_cffi non è più necessaria per l'estrazione finale,
-# ma la manteniamo per completezza se volessi usarla altrove.
 from curl_cffi import requests 
 import jsbeautifier
 import os
@@ -549,9 +545,11 @@ def enumerate_and_download_series(sb_instance: SB, series_url: str, seasons_arg,
             continue
 
         print(f"{Bcolors.HEADER}M3U8 trovato: {m3u8_link}{Bcolors.ENDC}")
-        ensure_dir(outdir)
+        # Struttura: <outdir>/Serie/<Serie>/Sxx/
+        season_dir = outdir / "Serie" / series_title / f"S{s_num:02d}"
+        ensure_dir(season_dir)
         out_name = f"{series_title} - Stagione {s_num:02d} - Episodio {e_num:02d}.mp4"
-        out_path = outdir / sanitize_filename(out_name)
+        out_path = season_dir / sanitize_filename(out_name)
         download_m3u8_to_mp4(m3u8_link, out_path)
         time.sleep(delay + random.uniform(0.5, 1.5))
 
@@ -681,7 +679,7 @@ def main():
     parser.add_argument('--link', type=str, help='Link diretto alla pagina del film o serie TV.')
     parser.add_argument('--seasons', type=str, default='all', help="Selezione stagioni: 'all' o lista/range es. '1,3-4'")
     parser.add_argument('--episodes', type=str, default='all', help="Selezione episodi: 'all' o lista/range es. '1,5-10'")
-    parser.add_argument('--outdir', type=str, default=str(Path.cwd() / 'downloaded_files'), help='Directory di destinazione per i file MP4.')
+    parser.add_argument('--outdir', type=str, default=str(Path.cwd() / 'Video'), help="Directory base di destinazione. Verranno creati: 'Serie/<Titolo>/Sxx' per le serie e 'Movie/<Titolo>' per i film.")
     parser.add_argument('--headless', action='store_true', help='Esegui il browser in headless (default).')
     parser.add_argument('--no-headless', dest='headless', action='store_false', help='Mostra il browser (non headless).')
     parser.set_defaults(headless=True)
@@ -758,8 +756,9 @@ def main():
                     print(f"{Bcolors.OKGREEN}{m3u8_final_link}{Bcolors.ENDC}")
                     # Prova download film
                     page_title = sanitize_filename(get_series_title_from_page(sb))
-                    ensure_dir(outdir)
-                    out_path = outdir / f"{page_title or 'Film'}.mp4"
+                    movie_dir = outdir / "Movie" / (page_title or 'Film')
+                    ensure_dir(movie_dir)
+                    out_path = movie_dir / f"{page_title or 'Film'}.mp4"
                     download_m3u8_to_mp4(m3u8_final_link, out_path)
                 else:
                     print(f"{Bcolors.FAIL}Impossibile trovare il link .m3u8 finale.{Bcolors.ENDC}")

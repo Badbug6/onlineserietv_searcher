@@ -47,7 +47,7 @@ Script Python per cercare, aprire e scaricare flussi video (.m3u8) da pagine di 
   ```
 - Serie TV (tutte le stagioni/episodi):
   ```bash
-  python main.py --link "https://onlineserietv.com/serietv/nome-serie/" --seasons all --episodes all --outdir downloaded_files
+  python main.py --link "https://onlineserietv.com/serietv/nome-serie/" --seasons all --episodes all
   ```
 - Mostra il browser (per debug o se Cloudflare crea problemi):
   ```bash
@@ -58,7 +58,10 @@ Script Python per cercare, aprire e scaricare flussi video (.m3u8) da pagine di 
 - `--link` (string): URL della pagina di film o serie TV su onlineserietv.com.
 - `--seasons` (string, default `all`): per selezionare le stagioni. Esempi: `all`, `1`, `1,3-4`.
 - `--episodes` (string, default `all`): per selezionare gli episodi. Esempi: `all`, `1-3,5`.
-- `--outdir` (string): cartella di output per i file MP4 (di default `downloaded_files`).
+- `--outdir` (string): cartella base di output (default `Video`).
+  - Struttura generata automaticamente:
+    - Serie: `Video/Serie/<Nome Serie>/Sxx/<Nome Serie> - Stagione xx - Episodio yy.mp4`
+    - Film: `Video/Movie/<Nome Film>/<Nome Film>.mp4`
 - `--headless` / `--no-headless`: esegue il browser senza/with GUI (default headless).
 - `--max-retries` (int, default 3): tentativi massimi per l’estrazione del link `.m3u8` dal player.
 - `--delay` (float, default 2.0): ritardo tra i download degli episodi (aiuta a evitare rate-limit).
@@ -83,7 +86,7 @@ Nota: il colore della barra di avanzamento è configurabile nel codice tramite l
 3. Episodio: selezione del player "fx" (Flexy) quando presente e attesa dell’iframe annidato del player (pattern come `uprot.net/fxe`/`flexy`).
 4. Estrazione `.m3u8`: lo script offuscato nel player viene “beautificato” con `jsbeautifier` e si legge il valore `sources[0].src` via regex.
 5. Download: si stima la durata con `ffprobe` (se possibile) e si scarica con `ffmpeg -c copy` mostrando una barra `tqdm` in secondi con ETA; in caso contrario, si procede senza barra.
-6. Output: salvataggio MP4 con nome ripulito in `outdir` (es. `Titolo Serie - Stagione 01 - Episodio 02.mp4`).
+6. Output: salvataggio MP4 con nome ripulito nella struttura `Video/Serie/...` o `Video/Movie/...` come sopra.
 
 ## Struttura dei file di output
 - Di default i file vengono salvati nella cartella indicata con `--outdir`.
