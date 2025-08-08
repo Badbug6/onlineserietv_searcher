@@ -116,3 +116,8 @@ Nota: il colore della barra di avanzamento è configurabile nel codice tramite l
 Questo progetto è a solo scopo didattico. Devi rispettare i termini d’uso del sito sorgente e le leggi sul diritto d’autore del tuo Paese. L’autore non è responsabile per usi impropri dello strumento.
 
 
+## Ringraziamenti
+
+- Un sentito grazie a [Arrowar](https://github.com/Arrowar) per il suo repository [Streamincommunity](https://github.com/Arrowar/Streamincommunity), fonte di ispirazione e riferimento per la gestione di player e scraping.
+- Grazie anche a [UrloMythus](https://github.com/UrloMythus/MammaMia) per il suo script dedicato all’estrazione dei link dal player Flexy, che ha fornito spunti tecnici fondamentali per la decodifica degli script offuscati.
+
