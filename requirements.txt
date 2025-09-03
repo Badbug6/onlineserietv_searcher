@@ -1,6 +1,7 @@
-seleniumbase
-bs4
+beautifulsoup4
+camoufox
+camoufox[geoip]
 curl_cffi
 jsbeautifier
+playwright-captcha
 tqdm
-requests

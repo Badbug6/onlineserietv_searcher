@@ -59,3 +59,5 @@ active_requests.json
 working_proxies.json
 test_1.py
 main_copy.py
+debug_screenshots/
+browser_data/

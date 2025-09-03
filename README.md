@@ -1,139 +1,107 @@
-## onlineserietv_searcher
-
-Script Python per cercare, aprire e scaricare flussi video (.m3u8) da pagine di film e serie TV su onlineserietv.com. Per le serie TV, il tool individua stagioni ed episodi dalla pagina di selezione interna (iframe) e automatizza l’estrazione del link .m3u8 dal player, salvando infine il video in MP4 con una barra di avanzamento e tempo stimato alla fine.
+Script Python per cercare e scaricare flussi video (.m3u8) da pagine di film e serie TV su onlineserietv.com.
+Lo script è **autonomo e portatile**: gestisce automaticamente il download del browser necessario per l'automazione e può scaricare FFmpeg se non è già installato.
 
 ### Caratteristiche principali
-- Rilevamento automatico di film vs serie TV dal link.
-- Per le serie: lettura delle stagioni da `div.div_seasons` e degli episodi da `div.div_episodes` all’interno dell’iframe `streaming-serie-tv`.
-- Per ogni episodio: selezione del player "fx" (Flexy) quando presente e rilevamento dell’iframe annidato del player.
-- Estrazione del link `.m3u8` decodificando lo script offuscato del player.
-- Download MP4 tramite `ffmpeg` in copia diretta (senza ricodifica) con barra di avanzamento ed ETA grazie a `tqdm` e una stima di durata via `ffprobe`.
-- Nomi file ripuliti automaticamente e struttura di output personalizzabile.
+- **Navigazione Robusta:** Utilizza **Camoufox (basato su Playwright)** per una navigazione più affidabile, eludendo le comuni protezioni anti-bot.
+- **Gestione FFmpeg:** Se `ffmpeg` non è nel PATH, lo script tenta di scaricare una versione compatibile per il tuo sistema operativo.
+- **Logica di Download Intelligente:**
+    - Rileva automaticamente film e serie TV.
+    - Per le serie, legge stagioni ed episodi dall'interfaccia del sito.
+    - Seleziona in modo intelligente il player video corretto (`Flexy`) per evitare CAPTCHA.
+    - Simula le interazioni umane, come cliccare sul pulsante "Play" per attivare il caricamento del video.
+    - Include una logica di **tentativi multipli** per superare caricamenti lenti o errori temporanei.
+- **Download Ottimizzato:** Scarica i video in formato MP4 tramite `ffmpeg` (copia diretta, senza ricodifica) e mostra una barra di avanzamento con il tempo trascorso.
+- **Output Organizzato:** Salva i file con nomi puliti in una struttura di cartelle logica e personalizzabile.
 
 ## Requisiti
-- Python 3.10+ (raccomandato)
-- Google Chrome (il driver è gestito automaticamente da SeleniumBase in modalità Undetected)
-- `ffmpeg` e `ffprobe` disponibili nel PATH
-  - Su Windows: installa `ffmpeg` da `https://ffmpeg.org` oppure tramite `choco install ffmpeg` se usi Chocolatey
-- Dipendenze Python (vedi `requirements.txt`):
-  - seleniumbase
-  - bs4
-  - curl_cffi
-  - jsbeautifier
-  - tqdm
-  - requests
+- Python 3.10+
+- `ffmpeg` e `ffprobe` (consigliato, ma lo script tenterà di installarli se non presenti)
+- Dipendenze Python (installate automaticamente tramite `requirements.txt`)
 
 ## Installazione
-1. Crea/attiva un virtualenv (consigliato):
-   ```bash
-   python -m venv .venv
-   .venv\Scripts\activate  # Windows
-   # source .venv/bin/activate  # Linux/macOS
-   ```
-2. Installa le dipendenze:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Assicurati che `ffmpeg` e `ffprobe` siano raggiungibili da terminale:
-   ```bash
-   ffmpeg -version
-   ffprobe -version
-   ```
+1.  **Clona il repository (o scarica lo ZIP):**
+    ```bash
+    git clone https://github.com/tuo-username/onlineserietv_searcher.git
+    cd onlineserietv_searcher
+    ```
+2.  **Crea e attiva un ambiente virtuale (consigliato):**
+    ```bash
+    python -m venv .venv
+    # Su Windows
+    .venv\Scripts\activate
+    # Su Linux/macOS
+    source .venv/bin/activate
+    ```
+3.  **Installa le dipendenze Python:**
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-## Uso rapido
-- Film singolo (passando il link):
-  ```bash
-  python main.py --link "https://onlineserietv.com/film/…"
-  ```
-- Serie TV (tutte le stagioni/episodi):
-  ```bash
-  python main.py --link "https://onlineserietv.com/serietv/nome-serie/" --seasons all --episodes all
-  ```
-- Mostra il browser (per debug o se Cloudflare crea problemi):
-  ```bash
-  python main.py --link "…" --no-headless
-  ```
+### Prima Esecuzione
+La prima volta che avvii lo script, questo eseguirà una configurazione automatica:
+- **Controllerà la presenza del browser** per l'automazione.
+- Se non lo trova, avvierà il **download automatico** (potrebbe richiedere qualche minuto). Vedrai uno **spinner di attività** che indica che il processo è in corso.
+- Le esecuzioni successive saranno immediate.
 
-## Opzioni principali
-- `--link` (string): URL della pagina di film o serie TV su onlineserietv.com.
-- `--seasons` (string, default `all`): per selezionare le stagioni. Esempi: `all`, `1`, `1,3-4`.
-- `--episodes` (string, default `all`): per selezionare gli episodi. Esempi: `all`, `1-3,5`.
-- `--outdir` (string): cartella base di output (default `Video`).
-  - Struttura generata automaticamente:
-    - Serie: `Video/Serie/<Nome Serie>/Sxx/<Nome Serie> - Stagione xx - Episodio yy.mp4`
-    - Film: `Video/Movie/<Nome Film>/<Nome Film>.mp4`
-- `--headless` / `--no-headless`: esegue il browser senza/with GUI (default headless).
-- `--max-retries` (int, default 3): tentativi massimi per l’estrazione del link `.m3u8` dal player.
-- `--delay` (float, default 2.0): ritardo tra i download degli episodi (aiuta a evitare rate-limit).
- - `--color` (string): colore della barra progresso (`cyan`, `green`, `yellow`, ecc.).
- - `--no-progress` (flag): disabilita la barra di avanzamento.
- - `--log-file` (string): scrive un log dettagliato su file.
+## Uso
+Lo script può essere usato in due modalità: **ricerca interattiva** o **download diretto** tramite link.
 
-Nota: puoi anche impostare `--color` per cambiare al volo il colore della barra (oltre alla variabile `PROGRESS_BAR_COLOR` in `main.py`).
+**Esempio 1: Ricerca Interattiva**
+Esegui lo script senza argomenti. Ti verrà chiesto di inserire un titolo, e potrai scegliere dai risultati.
+```bash
+python main.py
+```
 
-## Esempi
-- Scaricare tutte le stagioni/episodi di una serie in GUI visibile:
-  ```bash
-  python main.py --link "https://onlineserietv.com/serietv/black-mirror/" --seasons all --episodes all --outdir Download --no-headless
-  ```
-- Solo Stagione 2, episodi 1–3 e 6:
-  ```bash
-  python main.py --link "https://onlineserietv.com/serietv/…" --seasons 2 --episodes 1-3,6
-  ```
- - Impostare colore e/o disattivare barra:
-   ```bash
-   python main.py --link "https://onlineserietv.com/film/..." --color cyan --no-progress
-   ```
- - Scrivere log su file:
-   ```bash
-   python main.py --link "..." --log-file run.log
-   ```
+**Esempio 2: Download Diretto di un Film**
+```bash
+python main.py --link "https://onlineserietv.com/film/nome-film/"
+```
 
-## Come funziona (alto livello)
-1. Apertura pagina contenuto (film/serie) con SeleniumBase in modalità UC (bypass Cloudflare).
-2. Serie TV: individuazione dell’iframe `streaming-serie-tv`; dentro l’iframe si leggono
-   - le stagioni da `div.div_seasons a` (link del tipo `/streaming-serie-tv/<id>/<season>/<episode>/`),
-   - e gli episodi da `div.div_episodes a` nelle relative pagine di stagione.
-3. Episodio: selezione del player "fx" (Flexy) quando presente e attesa dell’iframe annidato del player (pattern come `uprot.net/fxe`/`flexy`).
-4. Estrazione `.m3u8`: lo script offuscato nel player viene “beautificato” con `jsbeautifier` e si legge il valore `sources[0].src` via regex.
-5. Download: si stima la durata con `ffprobe` (se possibile) e si scarica con `ffmpeg -c copy` mostrando una barra `tqdm` in secondi con ETA; in caso contrario, si procede senza barra.
-6. Output: salvataggio MP4 con nome ripulito nella struttura `Video/Serie/...` o `Video/Movie/...` come sopra.
+**Esempio 3: Download di una Serie TV Completa**
+```bash
+python main.py --link "https://onlineserietv.com/serietv/nome-serie/"
+```
 
-### Gestione automatica di ffmpeg/ffprobe
-- Se `ffmpeg`/`ffprobe` non sono nel PATH, lo script scarica automaticamente build precompilate nella cartella `bin/` accanto allo script (Windows/macOS/Linux), assegna i permessi di esecuzione e usa quei binari.
-- Gli archivi temporanei (zip/tar.xz) vengono eliminati dopo l’estrazione.
-- In assenza di connessione o se il download fallisce, installa manualmente `ffmpeg`/`ffprobe` oppure posiziona i binari dentro `bin/`.
+**Esempio 4: Download di Episodi Specifici**
+Scarica la stagione 2, episodi da 1 a 3 e l'episodio 5.
+```bash
+python main.py --link "https://onlineserietv.com/serietv/nome-serie/" --seasons 2 --episodes 1-3,5
+```
 
-## Struttura dei file di output
+## Opzioni Principali
+- `--link` (string): URL diretto della pagina del film o della serie. Se omesso, avvia la modalità interattiva.
+- `--seasons` (string, default `all`): Seleziona le stagioni da scaricare. Esempi: `all`, `1`, `1,3-4`.
+- `--episodes` (string, default `all`): Seleziona gli episodi. Esempi: `all`, `1-3,5`.
+- `--outdir` (string): Cartella base per i download (default: `Downloads`).
+- `--headless` / `--no-headless`: Esegue il browser in background (default) o in modalità visibile (utile per il debug).
+- `--delay` (float, default `2.0`): Secondi di attesa tra il download di un episodio e il successivo.
 
-- Puoi scegliere la cartella di destinazione dei file scaricati usando il parametro `--outdir`.  
-  Ad esempio, per salvare tutto nella cartella `Download`, aggiungi `--outdir Download` al comando:
-  ```bash
-  python main.py --link "..." --outdir Download
-  ```
-  Se non specifichi `--outdir`, verrà usata la cartella predefinita `Video`.
+## Come Funziona (dettagli tecnici)
+1.  **Setup:** Alla prima esecuzione, lo script invoca `playwright install` per scaricare un'istanza locale del browser nella cartella `browser_data`.
+2.  **Navigazione:** La pagina viene aperta con **Camoufox**, che gestisce l'identità del browser per ridurre le probabilità di essere bloccati.
+3.  **Logica di Estrazione:**
+    - Per le serie, viene individuato l'iframe `streaming-serie-tv` per enumerare stagioni ed episodi.
+    - Per ogni episodio, lo script **controlla il player attivo**. Se non è "Flexy (`fx`)", lo seleziona e attende il ricaricamento della pagina.
+    - Viene eseguito un controllo proattivo per la presenza di **CAPTCHA**; se rilevato, lo script forza un nuovo tentativo.
+    - Viene simulato un click sull'area del player (`.video-js`) per attivare la richiesta del flusso video.
+4.  **Parsing:** Lo script offuscato all'interno dell'iframe del player viene analizzato con `jsbeautifier` e una regex per estrarre il link `.m3u8` finale.
+5.  **Download:** `ffmpeg` viene usato per scaricare il flusso video senza ricodifica (`-c copy`), garantendo la massima qualità e velocità.
 
-- La struttura delle cartelle viene creata automaticamente in base al tipo di contenuto:
-  - **Serie TV:**  
-    `Video/Serie/<Nome Serie>/Sxx/<Nome Serie> - Stagione xx - Episodio yy.mp4`
-  - **Film:**  
-    `Video/Movie/<Nome Film>/<Nome Film>.mp4`
-  (Se usi un valore diverso per `--outdir`, la struttura partirà da quella cartella.)
+## Struttura dei File di Output
+I file vengono salvati in una struttura ordinata all'interno della cartella specificata con `--outdir` (o `Downloads` di default).
+-   **Serie TV:**  
+    `Downloads/Serie/<Nome Serie>/Sxx/<Nome Serie> - SxxExx.mp4`
+-   **Film:**  
+    `Downloads/Film/<Nome Film>/<Nome Film>.mp4`
 
-- I nomi di cartelle e file sono ripuliti da caratteri non validi e spazi superflui per garantire compatibilità e ordine.
+## Risoluzione dei Problemi
+-   **Bloccato su "Just a moment..." o CAPTCHA:** Lo script è progettato per gestire queste situazioni con tentativi multipli. Se il problema persiste, prova ad eseguirlo con `--no-headless` per vedere cosa sta succedendo nel browser.
+-   **Installazione del browser fallita:** Assicurati di avere una connessione a internet stabile e che nessun firewall stia bloccando il download. Puoi provare a cancellare la cartella `browser_data` e riavviare lo script.
+-   **FFmpeg non trovato:** Se il download automatico fallisce, installa `ffmpeg` manualmente e assicurati che sia accessibile dal tuo terminale.
 
-## Risoluzione dei problemi
-- "Cloudflare / Just a moment": riprova con `--no-headless` e attendi il caricamento della pagina; eventuali ritardi sono normali.
-- Nessuna stagione/episodio rilevato: il sito potrebbe avere cambiato markup; i selettori sono in `enumerate_and_download_series` (ricerca di stagioni/episodi) e nella lista dei candidati iframe del player.
-- Nessuna barra di avanzamento: se `ffprobe` non riesce a determinare la durata, la barra a tempo non viene mostrata e si usa il fallback senza barra.
-- `ffmpeg`/`ffprobe` non trovati: assicurati che siano installati e presenti nel PATH.
-
-## Note legali
-Questo progetto è a solo scopo didattico. Devi rispettare i termini d’uso del sito sorgente e le leggi sul diritto d’autore del tuo Paese. L’autore non è responsabile per usi impropri dello strumento.
-
+## Note Legali
+Questo progetto è stato creato a solo scopo didattico. L'utente è tenuto a rispettare i termini di utilizzo del sito sorgente e le leggi sul diritto d'autore vigenti nel proprio Paese. L'autore non si assume alcuna responsabilità per un uso improprio dello strumento.
 
 ## Ringraziamenti
-
 - Un sentito grazie a [Arrowar](https://github.com/Arrowar) per il suo repository [Streamincommunity](https://github.com/Arrowar/Streamincommunity), fonte di ispirazione e riferimento per la gestione di player e scraping.
 - Grazie anche a [UrloMythus](https://github.com/UrloMythus/MammaMia) per il suo script dedicato all’estrazione dei link dal player Flexy, che ha fornito spunti tecnici fondamentali per la decodifica degli script offuscati.
-
